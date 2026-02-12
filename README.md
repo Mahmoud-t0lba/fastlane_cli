@@ -1,45 +1,37 @@
-# fastlane-plugin-fastlane_configurator
+# fastlane_configurator
 
-Fastlane plugin to bootstrap a Flutter project's delivery setup as ready-to-run commands.
+`fastlane_configurator` is a Dart CLI package that bootstraps Fastlane configuration for Flutter projects.
 
-After installation, you can run commands to:
+It provides ready commands to:
 
-- generate Fastlane config files
-- fetch build/release metadata as JSON
-- wire CI directly with GitHub Actions
-- distribute builds directly to Firebase App Distribution
+- generate Fastlane files (`Fastfile`, `Appfile`, `.env.default`, `Pluginfile`)
+- generate GitHub Actions workflow for Android/iOS CI delivery
+- fetch project/git/GitHub metadata into JSON for CI and release automation
+- wire Firebase App Distribution lanes directly
 
 ## Install
 
-### Local path (this repository)
-
-In target project `fastlane/Pluginfile`:
-
-```ruby
-gem "fastlane-plugin-fastlane_configurator", path: "/Users/tolba/StudioProjects/fastlane"
-```
-
-Then:
+### Global CLI install
 
 ```bash
-bundle install
+dart pub global activate fastlane_configurator
 ```
 
-### RubyGems (after publishing)
-
-```ruby
-gem "fastlane-plugin-fastlane_configurator"
-```
-
-## Main commands
-
-### 1) Bootstrap full setup
+If needed, add pub global binaries to your PATH:
 
 ```bash
-bundle exec fastlane run configure_fastlane overwrite:true
+export PATH="$PATH:$HOME/.pub-cache/bin"
 ```
 
-This creates/updates:
+## Commands
+
+### 1) Setup project delivery files
+
+```bash
+fastlane_configurator setup --project-root . --overwrite
+```
+
+Generated files:
 
 - `fastlane/Fastfile`
 - `fastlane/Appfile`
@@ -47,43 +39,31 @@ This creates/updates:
 - `fastlane/.env.default`
 - `.github/workflows/mobile_delivery.yml`
 
-### 2) Fetch data (local + git + GitHub API)
+Useful setup flags:
+
+- `--no-ci` skip workflow generation
+- `--no-env` skip `.env.default` generation
+- `--ci-branch main` set workflow push branch
+- `--workflow-filename mobile_delivery.yml` customize workflow filename
+- `--ios-bundle-id com.example.app` manual override
+- `--android-package-name com.example.app` manual override
+
+### 2) Fetch metadata for CI
 
 ```bash
-bundle exec fastlane run fetch_mobile_data output_path:"fastlane/build_data.json"
+fastlane_configurator fetch-data --project-root . --output-path fastlane/build_data.json --include-github
 ```
 
-### 3) Run ready lanes
+This writes a JSON file with:
 
-```bash
-bundle exec fastlane fetch_data
-bundle exec fastlane android ci_android
-bundle exec fastlane ios ci_ios
-```
+- app package name and version
+- inferred iOS/Android identifiers
+- git branch/sha/tag
+- optional GitHub latest release/workflow run
 
-## Generated lanes
+Use `--no-include-github` to skip GitHub API calls.
 
-Top-level lane:
-
-- `fetch_data`: writes `fastlane/build_data.json`
-
-Android lanes:
-
-- `build_android`
-- `firebase_android`
-- `release_android`
-- `ci_android` (fetch + build + firebase)
-
-iOS lanes:
-
-- `build_ios`
-- `firebase_ios`
-- `release_ios`
-- `ci_ios` (fetch + build + firebase)
-
-## Required environment variables
-
-Set these in local shell or GitHub Secrets/Vars:
+## Required environment variables for generated lanes/workflow
 
 - `FIREBASE_TOKEN`
 - `FIREBASE_APP_ID_ANDROID`
@@ -93,11 +73,3 @@ Set these in local shell or GitHub Secrets/Vars:
 - `GITHUB_TOKEN`
 - `FASTLANE_APP_IDENTIFIER`
 - `FASTLANE_ANDROID_PACKAGE_NAME`
-
-## Workflow behavior
-
-Generated workflow `.github/workflows/mobile_delivery.yml`:
-
-- runs Android on `ubuntu-latest`
-- runs iOS on `macos-latest` only if `vars.ENABLE_IOS == 'true'`
-- installs Firebase CLI and triggers Fastlane CI lanes directly

@@ -1,0 +1,878 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:args/args.dart';
+import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
+import 'package:yaml/yaml.dart';
+
+typedef LineWriter = void Function(String message);
+
+class FastlaneConfiguratorCli {
+  FastlaneConfiguratorCli({
+    LineWriter? out,
+    LineWriter? err,
+    http.Client? httpClient,
+  })  : _out = out ?? ((message) => stdout.writeln(message)),
+        _err = err ?? ((message) => stderr.writeln(message)),
+        _httpClient = httpClient ?? http.Client();
+
+  final LineWriter _out;
+  final LineWriter _err;
+  final http.Client _httpClient;
+
+  ArgParser _buildParser() {
+    final parser = ArgParser()
+      ..addFlag(
+        'help',
+        abbr: 'h',
+        negatable: false,
+        help: 'Show this help message.',
+      );
+
+    parser.addCommand('setup', _setupParser());
+    parser.addCommand('fetch-data', _fetchDataParser());
+    return parser;
+  }
+
+  ArgParser _setupParser() {
+    return ArgParser()
+      ..addFlag(
+        'help',
+        abbr: 'h',
+        negatable: false,
+        help: 'Show setup command help.',
+      )
+      ..addOption(
+        'project-root',
+        help: 'Root path of target Flutter project.',
+        defaultsTo: '.',
+      )
+      ..addFlag(
+        'overwrite',
+        help: 'Overwrite existing generated files.',
+        defaultsTo: false,
+      )
+      ..addFlag(
+        'ci',
+        help: 'Generate .github/workflows workflow.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addFlag(
+        'env',
+        help: 'Generate fastlane/.env.default file.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addOption(
+        'workflow-filename',
+        help: 'Workflow filename under .github/workflows.',
+        defaultsTo: 'mobile_delivery.yml',
+      )
+      ..addOption(
+        'ci-branch',
+        help: 'Branch that triggers workflow push.',
+        defaultsTo: 'main',
+      )
+      ..addOption(
+        'ios-bundle-id',
+        help: 'Manual iOS bundle id override.',
+      )
+      ..addOption(
+        'android-package-name',
+        help: 'Manual Android package name override.',
+      )
+      ..addOption(
+        'apple-id',
+        help: 'Apple ID email for App Store Connect operations.',
+      )
+      ..addOption(
+        'team-id',
+        help: 'Apple Developer Team ID.',
+      )
+      ..addOption(
+        'itc-team-id',
+        help: 'App Store Connect Team ID.',
+      );
+  }
+
+  ArgParser _fetchDataParser() {
+    return ArgParser()
+      ..addFlag(
+        'help',
+        abbr: 'h',
+        negatable: false,
+        help: 'Show fetch-data command help.',
+      )
+      ..addOption(
+        'project-root',
+        help: 'Root path of target Flutter project.',
+        defaultsTo: '.',
+      )
+      ..addOption(
+        'output-path',
+        help: 'Output JSON file path.',
+        defaultsTo: 'fastlane/build_data.json',
+      )
+      ..addFlag(
+        'include-github',
+        help: 'Include latest release and workflow run data from GitHub API.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addOption(
+        'github-repository',
+        help: 'GitHub repository in owner/repo format.',
+      )
+      ..addOption(
+        'github-token',
+        help: 'GitHub token for authenticated API requests.',
+      );
+  }
+
+  Future<int> run(List<String> args) async {
+    final parser = _buildParser();
+    try {
+      final results = parser.parse(args);
+
+      if (results['help'] as bool) {
+        _out(_topLevelUsage(parser));
+        return 0;
+      }
+
+      final command = results.command;
+      if (command == null) {
+        _err('Missing command.');
+        _out(_topLevelUsage(parser));
+        return 64;
+      }
+
+      final commandParser = parser.commands[command.name]!;
+      if (command['help'] as bool) {
+        _out(_commandUsage(command.name!, commandParser));
+        return 0;
+      }
+
+      switch (command.name) {
+        case 'setup':
+          await _runSetup(command);
+          return 0;
+        case 'fetch-data':
+          await _runFetchData(command);
+          return 0;
+        default:
+          _err('Unknown command: ${command.name}');
+          _out(_topLevelUsage(parser));
+          return 64;
+      }
+    } on ArgParserException catch (error) {
+      _err(error.message);
+      _out(_topLevelUsage(parser));
+      return 64;
+    } catch (error) {
+      _err('Error: $error');
+      return 1;
+    }
+  }
+
+  String _topLevelUsage(ArgParser parser) {
+    return '''
+Configure Fastlane + Firebase + GitHub Actions for Flutter projects.
+
+Usage:
+  fastlane_configurator <command> [options]
+
+Commands:
+  setup       Generate Fastlane, env, and GitHub Actions configuration files.
+  fetch-data  Collect project/git/GitHub metadata into JSON.
+
+Global options:
+${parser.usage}
+''';
+  }
+
+  String _commandUsage(String commandName, ArgParser commandParser) {
+    return '''
+Usage:
+  fastlane_configurator $commandName [options]
+
+Options:
+${commandParser.usage}
+''';
+  }
+
+  Future<void> _runSetup(ArgResults command) async {
+    final projectRoot = p.normalize(
+      p.absolute(_stringValue(command['project-root']) ?? '.'),
+    );
+    final overwrite = command['overwrite'] as bool;
+    final configureCi = command['ci'] as bool;
+    final configureEnv = command['env'] as bool;
+    final workflowFilename =
+        _stringValue(command['workflow-filename']) ?? 'mobile_delivery.yml';
+    final ciBranch = _stringValue(command['ci-branch']) ?? 'main';
+
+    final iosBundleId = _stringValue(command['ios-bundle-id']) ??
+        _inferIosBundleId(projectRoot) ??
+        'com.example.app';
+    final androidPackageName = _stringValue(command['android-package-name']) ??
+        _inferAndroidPackageName(projectRoot) ??
+        'com.example.app';
+    final appleId = _stringValue(command['apple-id']);
+    final teamId = _stringValue(command['team-id']);
+    final itcTeamId = _stringValue(command['itc-team-id']);
+
+    final fastlaneDir = Directory(p.join(projectRoot, 'fastlane'));
+    fastlaneDir.createSync(recursive: true);
+
+    final results = <String, String>{};
+
+    results['fastlane/Fastfile'] = _writeTextFile(
+      p.join(projectRoot, 'fastlane', 'Fastfile'),
+      _buildFastfile(androidPackageName),
+      overwrite,
+    );
+
+    results['fastlane/Appfile'] = _writeTextFile(
+      p.join(projectRoot, 'fastlane', 'Appfile'),
+      _buildAppfile(
+        iosBundleId: iosBundleId,
+        appleId: appleId,
+        teamId: teamId,
+        itcTeamId: itcTeamId,
+      ),
+      overwrite,
+    );
+
+    results['fastlane/Pluginfile'] = _ensurePluginfile(
+      p.join(projectRoot, 'fastlane', 'Pluginfile'),
+      overwrite,
+    );
+
+    if (configureEnv) {
+      results['fastlane/.env.default'] = _writeTextFile(
+        p.join(projectRoot, 'fastlane', '.env.default'),
+        _buildEnvFile(
+          iosBundleId: iosBundleId,
+          androidPackageName: androidPackageName,
+          appleId: appleId,
+          teamId: teamId,
+          itcTeamId: itcTeamId,
+        ),
+        overwrite,
+      );
+    }
+
+    if (configureCi) {
+      final workflowPath = p.join(
+        projectRoot,
+        '.github',
+        'workflows',
+        workflowFilename,
+      );
+      results['.github/workflows/$workflowFilename'] = _writeTextFile(
+        workflowPath,
+        _buildGithubWorkflow(ciBranch),
+        overwrite,
+      );
+    }
+
+    _out('Setup complete for: $projectRoot');
+    _out('Detected iOS bundle id: $iosBundleId');
+    _out('Detected Android package: $androidPackageName');
+    for (final entry in results.entries) {
+      _out('- ${entry.key}: ${entry.value}');
+    }
+  }
+
+  Future<void> _runFetchData(ArgResults command) async {
+    final projectRoot = p.normalize(
+      p.absolute(_stringValue(command['project-root']) ?? '.'),
+    );
+    final outputPath =
+        _stringValue(command['output-path']) ?? 'fastlane/build_data.json';
+    final includeGithub = command['include-github'] as bool;
+
+    final repository = _stringValue(command['github-repository']) ??
+        _stringValue(Platform.environment['GITHUB_REPOSITORY']);
+    final token = _stringValue(command['github-token']) ??
+        _stringValue(Platform.environment['GITHUB_TOKEN']);
+
+    final appData = _readPubspecAppData(projectRoot);
+
+    final payload = <String, Object?>{
+      'generated_at_utc': DateTime.now().toUtc().toIso8601String(),
+      'project_root': projectRoot,
+      'app': <String, Object?>{
+        'name': appData['name'],
+        'version_name': appData['version_name'],
+        'version_code': appData['version_code'],
+      },
+      'identifiers': <String, Object?>{
+        'ios_bundle_id': _inferIosBundleId(projectRoot),
+        'android_package_name': _inferAndroidPackageName(projectRoot),
+      },
+      'git': <String, Object?>{
+        'branch': await _gitOutput(projectRoot, [
+          'rev-parse',
+          '--abbrev-ref',
+          'HEAD',
+        ]),
+        'sha': await _gitOutput(projectRoot, ['rev-parse', 'HEAD']),
+        'latest_tag': await _gitOutput(projectRoot, [
+          'describe',
+          '--tags',
+          '--abbrev=0',
+        ]),
+      },
+    };
+
+    if (includeGithub) {
+      payload['github'] = await _buildGithubPayload(repository, token);
+    }
+
+    final absoluteOutputPath =
+        p.isAbsolute(outputPath) ? outputPath : p.join(projectRoot, outputPath);
+
+    final outputFile = File(absoluteOutputPath);
+    outputFile.parent.createSync(recursive: true);
+    const encoder = JsonEncoder.withIndent('  ');
+    outputFile.writeAsStringSync('${encoder.convert(payload)}\n');
+
+    _out('Metadata written to $absoluteOutputPath');
+  }
+
+  String? _stringValue(Object? value) {
+    if (value == null) {
+      return null;
+    }
+
+    final normalized = value.toString().trim();
+    return normalized.isEmpty ? null : normalized;
+  }
+
+  Map<String, String?> _readPubspecAppData(String projectRoot) {
+    final pubspecFile = File(p.join(projectRoot, 'pubspec.yaml'));
+    if (!pubspecFile.existsSync()) {
+      return <String, String?>{
+        'name': null,
+        'version_name': null,
+        'version_code': null,
+      };
+    }
+
+    final yaml = loadYaml(pubspecFile.readAsStringSync());
+    if (yaml is! YamlMap) {
+      return <String, String?>{
+        'name': null,
+        'version_name': null,
+        'version_code': null,
+      };
+    }
+
+    final name = _stringValue(yaml['name']);
+    final version = _stringValue(yaml['version']);
+
+    String? versionName;
+    String? versionCode;
+    if (version != null) {
+      final parts = version.split('+');
+      versionName = parts[0];
+      if (parts.length > 1) {
+        versionCode = parts[1];
+      }
+    }
+
+    return <String, String?>{
+      'name': name,
+      'version_name': versionName,
+      'version_code': versionCode,
+    };
+  }
+
+  String _writeTextFile(String path, String content, bool overwrite) {
+    final file = File(path);
+    file.parent.createSync(recursive: true);
+
+    if (file.existsSync()) {
+      final existing = file.readAsStringSync();
+      if (existing == content) {
+        return 'unchanged';
+      }
+      if (!overwrite) {
+        return 'skipped';
+      }
+
+      file.writeAsStringSync(content);
+      return 'updated';
+    }
+
+    file.writeAsStringSync(content);
+    return 'created';
+  }
+
+  String _ensurePluginfile(String path, bool overwrite) {
+    const managedBlock = '''# Managed by fastlane_configurator
+# Add Fastlane plugin gems here if needed, for example:
+# gem "fastlane-plugin-firebase_app_distribution"
+''';
+
+    final file = File(path);
+    file.parent.createSync(recursive: true);
+
+    if (!file.existsSync()) {
+      file.writeAsStringSync(managedBlock);
+      return 'created';
+    }
+
+    final current = file.readAsStringSync();
+    if (current.contains('Managed by fastlane_configurator')) {
+      return 'unchanged';
+    }
+
+    if (!overwrite) {
+      return 'skipped';
+    }
+
+    final withBreak = current.endsWith('\n') ? current : '$current\n';
+    file.writeAsStringSync('$withBreak$managedBlock');
+    return 'updated';
+  }
+
+  String _buildFastfile(String androidPackageName) {
+    final packageLiteral = _rubyLiteral(androidPackageName);
+    return '''# Autogenerated by fastlane_configurator
+
+default_platform(:android)
+
+desc "Fetch project metadata and write fastlane/build_data.json"
+lane :fetch_data do
+  sh("fastlane_configurator", "fetch-data", "--project-root", ".", "--output-path", "fastlane/build_data.json", "--include-github")
+end
+
+platform :android do
+  desc "Build Android AAB release for Flutter"
+  lane :build_android do
+    sh("flutter", "pub", "get")
+    sh("flutter", "build", "appbundle", "--release")
+  end
+
+  desc "Distribute Android build to Firebase App Distribution"
+  lane :firebase_android do |options|
+    artifact_path = options[:artifact_path] || Dir["build/app/outputs/bundle/release/*.aab"].max_by { |file| File.mtime(file) }
+    UI.user_error!("Android artifact not found. Run build_android first.") unless artifact_path
+
+    app_id = options[:app_id] || ENV["FIREBASE_APP_ID_ANDROID"]
+    token = ENV["FIREBASE_TOKEN"]
+    groups = options[:groups] || ENV["FIREBASE_TESTER_GROUPS"]
+    release_notes = options[:release_notes] || ENV["FIREBASE_RELEASE_NOTES"]
+
+    UI.user_error!("Missing FIREBASE_APP_ID_ANDROID") if app_id.to_s.empty?
+    UI.user_error!("Missing FIREBASE_TOKEN") if token.to_s.empty?
+
+    args = ["firebase", "appdistribution:distribute", artifact_path, "--app", app_id, "--token", token]
+    args += ["--groups", groups] unless groups.to_s.empty?
+    args += ["--release-notes", release_notes] unless release_notes.to_s.empty?
+    sh(*args)
+  end
+
+  desc "Build and upload Android app to Google Play"
+  lane :release_android do
+    build_android
+    upload_to_play_store(
+      package_name: ENV["FASTLANE_ANDROID_PACKAGE_NAME"] || $packageLiteral
+    )
+  end
+
+  desc "CI lane: fetch data, build Android, and distribute to Firebase"
+  lane :ci_android do
+    fetch_data
+    build_android
+    firebase_android
+  end
+end
+
+platform :ios do
+  desc "Build iOS IPA release for Flutter"
+  lane :build_ios do
+    sh("flutter", "pub", "get")
+    sh("flutter", "build", "ipa", "--release")
+  end
+
+  desc "Distribute iOS build to Firebase App Distribution"
+  lane :firebase_ios do |options|
+    artifact_path = options[:artifact_path] || Dir["build/ios/ipa/*.ipa"].max_by { |file| File.mtime(file) }
+    UI.user_error!("iOS artifact not found. Run build_ios first.") unless artifact_path
+
+    app_id = options[:app_id] || ENV["FIREBASE_APP_ID_IOS"]
+    token = ENV["FIREBASE_TOKEN"]
+    groups = options[:groups] || ENV["FIREBASE_TESTER_GROUPS"]
+    release_notes = options[:release_notes] || ENV["FIREBASE_RELEASE_NOTES"]
+
+    UI.user_error!("Missing FIREBASE_APP_ID_IOS") if app_id.to_s.empty?
+    UI.user_error!("Missing FIREBASE_TOKEN") if token.to_s.empty?
+
+    args = ["firebase", "appdistribution:distribute", artifact_path, "--app", app_id, "--token", token]
+    args += ["--groups", groups] unless groups.to_s.empty?
+    args += ["--release-notes", release_notes] unless release_notes.to_s.empty?
+    sh(*args)
+  end
+
+  desc "Build and upload iOS app to TestFlight"
+  lane :release_ios do
+    build_ios
+    upload_to_testflight(skip_waiting_for_build_processing: true)
+  end
+
+  desc "CI lane: fetch data, build iOS, and distribute to Firebase"
+  lane :ci_ios do
+    fetch_data
+    build_ios
+    firebase_ios
+  end
+end
+''';
+  }
+
+  String _buildAppfile({
+    required String iosBundleId,
+    String? appleId,
+    String? teamId,
+    String? itcTeamId,
+  }) {
+    final lines = <String>[
+      '# Autogenerated by fastlane_configurator',
+      'app_identifier(ENV["FASTLANE_APP_IDENTIFIER"] || ${_rubyLiteral(iosBundleId)})',
+      _optionalAppfileSetting('apple_id', 'FASTLANE_APPLE_ID', appleId),
+      _optionalAppfileSetting('team_id', 'FASTLANE_TEAM_ID', teamId),
+      _optionalAppfileSetting('itc_team_id', 'FASTLANE_ITC_TEAM_ID', itcTeamId),
+    ];
+
+    return '${lines.join('\n')}\n';
+  }
+
+  String _optionalAppfileSetting(String key, String envKey, String? value) {
+    if (value == null || value.isEmpty) {
+      return '$key(ENV["$envKey"]) if ENV["$envKey"]';
+    }
+
+    return '$key(ENV["$envKey"] || ${_rubyLiteral(value)})';
+  }
+
+  String _buildEnvFile({
+    required String iosBundleId,
+    required String androidPackageName,
+    String? appleId,
+    String? teamId,
+    String? itcTeamId,
+  }) {
+    return '''# Autogenerated by fastlane_configurator
+FASTLANE_APP_IDENTIFIER=$iosBundleId
+FASTLANE_ANDROID_PACKAGE_NAME=$androidPackageName
+FASTLANE_APPLE_ID=${appleId ?? ''}
+FASTLANE_TEAM_ID=${teamId ?? ''}
+FASTLANE_ITC_TEAM_ID=${itcTeamId ?? ''}
+GITHUB_REPOSITORY=
+GITHUB_TOKEN=
+FIREBASE_TOKEN=
+FIREBASE_APP_ID_ANDROID=
+FIREBASE_APP_ID_IOS=
+FIREBASE_TESTER_GROUPS=qa
+FIREBASE_RELEASE_NOTES=Automated distribution from Fastlane
+''';
+  }
+
+  String _buildGithubWorkflow(String ciBranch) {
+    return '''name: Mobile Delivery
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - $ciBranch
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: \${{ github.repository }}
+      FIREBASE_TOKEN: \${{ secrets.FIREBASE_TOKEN }}
+      FIREBASE_APP_ID_ANDROID: \${{ secrets.FIREBASE_APP_ID_ANDROID }}
+      FIREBASE_TESTER_GROUPS: \${{ vars.FIREBASE_TESTER_GROUPS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install tools
+        run: |
+          gem install fastlane
+          npm install -g firebase-tools
+          dart pub global activate fastlane_configurator
+          echo "\$HOME/.pub-cache/bin" >> \$GITHUB_PATH
+
+      - name: Fetch metadata
+        run: fastlane_configurator fetch-data --project-root . --output-path fastlane/build_data.json --include-github
+
+      - name: Run Android CI lane
+        run: fastlane android ci_android
+
+  ios:
+    if: \${{ vars.ENABLE_IOS == 'true' }}
+    runs-on: macos-latest
+    env:
+      GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: \${{ github.repository }}
+      FIREBASE_TOKEN: \${{ secrets.FIREBASE_TOKEN }}
+      FIREBASE_APP_ID_IOS: \${{ secrets.FIREBASE_APP_ID_IOS }}
+      FIREBASE_TESTER_GROUPS: \${{ vars.FIREBASE_TESTER_GROUPS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install tools
+        run: |
+          gem install fastlane
+          npm install -g firebase-tools
+          dart pub global activate fastlane_configurator
+          echo "\$HOME/.pub-cache/bin" >> \$GITHUB_PATH
+
+      - name: Fetch metadata
+        run: fastlane_configurator fetch-data --project-root . --output-path fastlane/build_data.json --include-github
+
+      - name: Run iOS CI lane
+        run: fastlane ios ci_ios
+''';
+  }
+
+  String? _inferIosBundleId(String projectRoot) {
+    final pbxproj = File(
+      p.join(projectRoot, 'ios', 'Runner.xcodeproj', 'project.pbxproj'),
+    );
+    if (!pbxproj.existsSync()) {
+      return null;
+    }
+
+    final matches = RegExp(
+      r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;]+);',
+    ).allMatches(pbxproj.readAsStringSync());
+
+    for (final match in matches) {
+      final raw = match.group(1);
+      if (raw == null) {
+        continue;
+      }
+
+      final value = raw.trim().replaceAll('"', '');
+      if (value.contains('RunnerTests') || value.contains(r'$(')) {
+        continue;
+      }
+
+      if (value.isNotEmpty) {
+        return value;
+      }
+    }
+
+    return null;
+  }
+
+  String? _inferAndroidPackageName(String projectRoot) {
+    final gradleKts =
+        File(p.join(projectRoot, 'android', 'app', 'build.gradle.kts'));
+    if (gradleKts.existsSync()) {
+      final match = RegExp(
+        r'applicationId\s*=\s*"([^"]+)"',
+      ).firstMatch(gradleKts.readAsStringSync());
+      if (match != null) {
+        return match.group(1);
+      }
+    }
+
+    final gradle = File(p.join(projectRoot, 'android', 'app', 'build.gradle'));
+    if (gradle.existsSync()) {
+      final match = RegExp(
+        r'''applicationId\s+["']([^"']+)["']''',
+      ).firstMatch(gradle.readAsStringSync());
+      if (match != null) {
+        return match.group(1);
+      }
+    }
+
+    final manifest = File(
+      p.join(
+          projectRoot, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
+    );
+    if (manifest.existsSync()) {
+      final match = RegExp(
+        r'package\s*=\s*"([^"]+)"',
+      ).firstMatch(manifest.readAsStringSync());
+      if (match != null) {
+        return match.group(1);
+      }
+    }
+
+    return null;
+  }
+
+  Future<String?> _gitOutput(String projectRoot, List<String> args) async {
+    try {
+      final result = await Process.run(
+        'git',
+        args,
+        workingDirectory: projectRoot,
+      );
+
+      if (result.exitCode != 0) {
+        return null;
+      }
+
+      final output = result.stdout.toString().trim();
+      return output.isEmpty ? null : output;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, Object?>> _buildGithubPayload(
+    String? repository,
+    String? token,
+  ) async {
+    if (repository == null) {
+      return <String, Object?>{
+        'repository': null,
+        'note':
+            'Set --github-repository or GITHUB_REPOSITORY to fetch GitHub API data.',
+      };
+    }
+
+    final payload = <String, Object?>{'repository': repository};
+
+    final releaseResponse = await _githubGet(
+      Uri.https('api.github.com', '/repos/$repository/releases/latest'),
+      token,
+    );
+
+    if (releaseResponse.statusCode == 200) {
+      payload['latest_release'] = <String, Object?>{
+        'tag': releaseResponse.data['tag_name'],
+        'name': releaseResponse.data['name'],
+        'published_at': releaseResponse.data['published_at'],
+      };
+    } else if (releaseResponse.statusCode == 404) {
+      payload['latest_release'] = null;
+    } else {
+      payload['latest_release_error'] =
+          _errorMessage('latest release', releaseResponse);
+    }
+
+    final runsResponse = await _githubGet(
+      Uri.https('api.github.com', '/repos/$repository/actions/runs',
+          <String, String>{'per_page': '1'}),
+      token,
+    );
+
+    if (runsResponse.statusCode == 200) {
+      final runs = runsResponse.data['workflow_runs'];
+      if (runs is List && runs.isNotEmpty && runs.first is Map) {
+        final run = runs.first as Map;
+        payload['latest_workflow_run'] = <String, Object?>{
+          'id': run['id'],
+          'name': run['name'],
+          'status': run['status'],
+          'conclusion': run['conclusion'],
+          'created_at': run['created_at'],
+          'url': run['html_url'],
+        };
+      } else {
+        payload['latest_workflow_run'] = null;
+      }
+    } else {
+      payload['latest_workflow_error'] =
+          _errorMessage('workflow runs', runsResponse);
+    }
+
+    return payload;
+  }
+
+  String _errorMessage(String endpoint, _GithubResponse response) {
+    if (response.statusCode == 0) {
+      return 'Failed to fetch $endpoint: ${response.error ?? 'unknown error'}';
+    }
+    return 'GitHub API returned ${response.statusCode} for $endpoint';
+  }
+
+  Future<_GithubResponse> _githubGet(Uri uri, String? token) async {
+    try {
+      final response = await _httpClient.get(
+        uri,
+        headers: <String, String>{
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'fastlane_configurator',
+          if (token != null && token.isNotEmpty)
+            'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.body.trim().isEmpty) {
+        return _GithubResponse(response.statusCode, <String, dynamic>{}, null);
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        return _GithubResponse(response.statusCode, decoded, null);
+      }
+
+      return _GithubResponse(response.statusCode, <String, dynamic>{}, null);
+    } catch (error) {
+      return _GithubResponse(0, <String, dynamic>{}, error.toString());
+    }
+  }
+
+  String _rubyLiteral(String value) {
+    final escaped = value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    return '"$escaped"';
+  }
+}
+
+class _GithubResponse {
+  _GithubResponse(this.statusCode, this.data, this.error);
+
+  final int statusCode;
+  final Map<String, dynamic> data;
+  final String? error;
+}
