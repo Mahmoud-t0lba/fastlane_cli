@@ -23,12 +23,34 @@ If needed, add pub global binaries to your PATH:
 export PATH="$PATH:$HOME/.pub-cache/bin"
 ```
 
+## Use this package as an executable
+
+Fastest usage after install:
+
+```bash
+fastlane_configurator --help
+```
+
+Short alias:
+
+```bash
+flc --help
+```
+
+Run without global install:
+
+```bash
+dart run fastlane_configurator:fastlane_configurator --help
+```
+
 ## Commands
 
 ### 1) Setup project delivery files
 
 ```bash
 fastlane_configurator setup --project-root . --overwrite
+# or:
+flc setup --project-root . --overwrite
 ```
 
 Generated files:
@@ -52,6 +74,8 @@ Useful setup flags:
 
 ```bash
 fastlane_configurator fetch-data --project-root . --output-path fastlane/build_data.json --include-github
+# or:
+flc fetch-data --project-root . --output-path fastlane/build_data.json --include-github
 ```
 
 This writes a JSON file with:

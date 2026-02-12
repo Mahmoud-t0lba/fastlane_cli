@@ -1,3 +1,9 @@
+## 0.1.1
+
+- Improved executable usage with a short alias: `flc`.
+- Added clear "Use this package as an executable" section in README.
+- Added no-global-install command example using `dart run`.
+
 ## 0.1.0
 
 - Initial public release.

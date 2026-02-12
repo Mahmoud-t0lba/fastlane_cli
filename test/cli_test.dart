@@ -5,7 +5,6 @@ import 'package:fastlane_configurator/fastlane_configurator.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
-@TestOn('vm')
 void main() {
   group('FastlaneConfiguratorCli', () {
     late List<String> logs;
