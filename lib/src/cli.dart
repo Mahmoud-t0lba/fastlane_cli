@@ -139,6 +139,16 @@ class FastlaneConfiguratorCli {
         help: 'Firebase metadata JSON output path.',
         defaultsTo: 'fastlane/firebase_data.json',
       )
+      ..addOption(
+        'appdist-groups',
+        help:
+            'Comma-separated Firebase App Distribution group aliases to ensure/create.',
+      )
+      ..addFlag(
+        'appdist-skip-group-setup',
+        help: 'Skip Firebase App Distribution group setup.',
+        defaultsTo: false,
+      )
       ..addFlag(
         'firebase-optional',
         help: 'Skip firebase sync errors if Firebase CLI is unavailable.',
@@ -304,6 +314,16 @@ class FastlaneConfiguratorCli {
         'optional',
         help: 'Skip errors if Firebase CLI is unavailable or not configured.',
         defaultsTo: false,
+      )
+      ..addOption(
+        'appdist-groups',
+        help:
+            'Comma-separated Firebase App Distribution group aliases to ensure/create.',
+      )
+      ..addFlag(
+        'skip-group-setup',
+        help: 'Skip Firebase App Distribution group setup.',
+        defaultsTo: false,
       );
   }
 
@@ -418,6 +438,9 @@ ${commandParser.usage}
       updateEnv: true,
       overwrite: true,
       optional: command['firebase-optional'] as bool,
+      appDistributionGroups: _stringValue(command['appdist-groups']),
+      setupAppDistributionGroups:
+          !(command['appdist-skip-group-setup'] as bool),
     );
 
     await _runFetchDataInternal(
@@ -544,6 +567,8 @@ ${commandParser.usage}
       updateEnv: command['update-env'] as bool,
       overwrite: command['overwrite'] as bool,
       optional: command['optional'] as bool,
+      appDistributionGroups: _stringValue(command['appdist-groups']),
+      setupAppDistributionGroups: !(command['skip-group-setup'] as bool),
     );
   }
 
@@ -555,6 +580,8 @@ ${commandParser.usage}
     required bool updateEnv,
     required bool overwrite,
     required bool optional,
+    required String? appDistributionGroups,
+    required bool setupAppDistributionGroups,
   }) async {
     final loggedIn = await _ensureFirebaseLogin(
       projectRoot: projectRoot,
@@ -596,6 +623,19 @@ ${commandParser.usage}
       projectId: resolvedProject,
       optional: true,
     );
+
+    final resolvedGroupAliases = _resolveAppDistributionGroupAliases(
+      envPath: envPath,
+      explicitGroups: appDistributionGroups,
+    );
+    if (setupAppDistributionGroups) {
+      await _ensureFirebaseAppDistributionGroups(
+        projectRoot: projectRoot,
+        projectId: resolvedProject,
+        groupAliases: resolvedGroupAliases,
+        optional: true,
+      );
+    }
 
     var appsResponse = await _runCommand(
       'firebase',
@@ -692,6 +732,8 @@ ${commandParser.usage}
         'FASTLANE_ANDROID_PACKAGE_NAME':
             _stringValue(androidApp?['packageName']),
         'FASTLANE_APP_IDENTIFIER': _stringValue(iosApp?['bundleId']),
+        if (resolvedGroupAliases.isNotEmpty)
+          'FIREBASE_TESTER_GROUPS': resolvedGroupAliases.join(','),
       };
 
       final envStatus = _upsertEnvFile(
@@ -732,8 +774,10 @@ ${commandParser.usage}
       'project_root': projectRoot,
       'app': <String, Object?>{
         'name': appData['name'],
+        'version': appData['version'],
         'version_name': appData['version_name'],
         'version_code': appData['version_code'],
+        'version_source': appData['version_source'],
       },
       'identifiers': <String, Object?>{
         'ios_bundle_id': _inferIosBundleId(projectRoot),
@@ -782,8 +826,10 @@ ${commandParser.usage}
     if (!pubspecFile.existsSync()) {
       return <String, String?>{
         'name': null,
+        'version': null,
         'version_name': null,
         'version_code': null,
+        'version_source': null,
       };
     }
 
@@ -791,8 +837,10 @@ ${commandParser.usage}
     if (yaml is! YamlMap) {
       return <String, String?>{
         'name': null,
+        'version': null,
         'version_name': null,
         'version_code': null,
+        'version_source': null,
       };
     }
 
@@ -811,8 +859,10 @@ ${commandParser.usage}
 
     return <String, String?>{
       'name': name,
+      'version': version,
       'version_name': versionName,
       'version_code': versionCode,
+      'version_source': 'pubspec.yaml',
     };
   }
 
@@ -1312,6 +1362,185 @@ ${commandParser.usage}
     return '$normalized\n\ndependencies:\n  firebase_core: any\n';
   }
 
+  List<String> _resolveAppDistributionGroupAliases({
+    required String envPath,
+    required String? explicitGroups,
+  }) {
+    var raw = _stringValue(explicitGroups);
+
+    if (raw == null) {
+      final envValue =
+          _stringValue(Platform.environment['FIREBASE_TESTER_GROUPS']);
+      if (envValue != null) {
+        raw = envValue;
+      }
+    }
+
+    if (raw == null) {
+      final envFile = File(envPath);
+      if (envFile.existsSync()) {
+        for (final line in envFile.readAsLinesSync()) {
+          final trimmed = line.trim();
+          if (trimmed.isEmpty || trimmed.startsWith('#')) {
+            continue;
+          }
+          if (!trimmed.startsWith('FIREBASE_TESTER_GROUPS=')) {
+            continue;
+          }
+          raw = _stringValue(
+            trimmed.substring('FIREBASE_TESTER_GROUPS='.length),
+          );
+          if (raw != null) {
+            break;
+          }
+        }
+      }
+    }
+
+    raw ??= 'qa';
+
+    final aliases = <String>{};
+    for (final entry in raw.split(',')) {
+      final alias = _stringValue(entry)?.toLowerCase();
+      if (alias != null) {
+        aliases.add(alias);
+      }
+    }
+
+    return aliases.toList()..sort();
+  }
+
+  Future<void> _ensureFirebaseAppDistributionGroups({
+    required String projectRoot,
+    required String projectId,
+    required List<String> groupAliases,
+    required bool optional,
+  }) async {
+    if (groupAliases.isEmpty) {
+      return;
+    }
+
+    final existingAliases = await _listFirebaseAppDistributionGroups(
+      projectRoot: projectRoot,
+      projectId: projectId,
+    );
+
+    for (final alias in groupAliases) {
+      if (existingAliases != null && existingAliases.contains(alias)) {
+        _out('Firebase App Distribution group "$alias" already exists.');
+        continue;
+      }
+
+      final displayName = _appDistributionDisplayName(alias);
+      final createResult = await _runCommand(
+        'firebase',
+        <String>[
+          'appdistribution:group:create',
+          displayName,
+          alias,
+          '--project',
+          projectId,
+        ],
+        projectRoot,
+        optional: true,
+      );
+      if (createResult == null) {
+        if (!optional) {
+          throw Exception(
+            'Unable to run firebase appdistribution:group:create for "$alias".',
+          );
+        }
+        _out(
+          'Skipping App Distribution group setup for "$alias": Firebase CLI is unavailable.',
+        );
+        continue;
+      }
+
+      if (createResult.exitCode == 0) {
+        _out('Created Firebase App Distribution group "$alias".');
+        continue;
+      }
+
+      final outputText =
+          '${createResult.stdout}\n${createResult.stderr}'.toLowerCase();
+      if (outputText.contains('already exists') ||
+          outputText.contains('already in use')) {
+        _out('Firebase App Distribution group "$alias" already exists.');
+        continue;
+      }
+
+      if (!optional) {
+        throw Exception(
+          'Failed to create App Distribution group "$alias": '
+          '${createResult.stderr.toString().trim()}',
+        );
+      }
+      _out(
+        'Skipping App Distribution group "$alias": '
+        '${createResult.stderr.toString().trim()}',
+      );
+    }
+  }
+
+  Future<Set<String>?> _listFirebaseAppDistributionGroups({
+    required String projectRoot,
+    required String projectId,
+  }) async {
+    final listResult = await _runCommand(
+      'firebase',
+      <String>[
+        'appdistribution:group:list',
+        '--project',
+        projectId,
+        '--json',
+      ],
+      projectRoot,
+      optional: true,
+    );
+    if (listResult == null || listResult.exitCode != 0) {
+      return null;
+    }
+
+    final decoded = _decodeJsonOrEmpty(listResult.stdout.toString());
+    final aliases = <String>{};
+
+    void collectFromList(dynamic entries) {
+      if (entries is! List) {
+        return;
+      }
+      for (final entry in entries.whereType<Map>()) {
+        final map = Map<String, dynamic>.from(entry);
+        final alias = _stringValue(map['alias']);
+        if (alias != null) {
+          aliases.add(alias.toLowerCase());
+        }
+      }
+    }
+
+    if (decoded is Map<String, dynamic>) {
+      collectFromList(decoded['result']);
+      collectFromList(decoded['groups']);
+    } else {
+      collectFromList(decoded);
+    }
+
+    return aliases;
+  }
+
+  String _appDistributionDisplayName(String alias) {
+    final normalized = alias.replaceAll('-', ' ').trim();
+    if (normalized.isEmpty) {
+      return 'QA';
+    }
+    final words = normalized
+        .split(RegExp(r'\s+'))
+        .map((word) => word.isEmpty
+            ? word
+            : '${word[0].toUpperCase()}${word.substring(1)}')
+        .toList();
+    return words.join(' ');
+  }
+
   bool _looksLikePlaceholderFirebaseProject(String value) {
     final normalized = value.trim().toLowerCase();
     return normalized == 'your-firebase-project-id' ||
@@ -1688,6 +1917,9 @@ ${commandParser.usage}
   String _buildFastfile(String androidPackageName) {
     final packageLiteral = _rubyLiteral(androidPackageName);
     return '''# Autogenerated by fastlane_configurator
+# Quick commands:
+# - fastlane android release_android_to_firebase
+# - fastlane ios release_ios_to_firebase
 
 default_platform(:android)
 
@@ -1737,6 +1969,14 @@ platform :android do
     build_android
     firebase_android
   end
+
+  # Use this lane for one-shot local release to Firebase App Distribution.
+  desc "Local lane: build Android and upload directly to Firebase App Distribution"
+  lane :release_android_to_firebase do
+    fetch_data
+    build_android
+    firebase_android
+  end
 end
 
 platform :ios do
@@ -1773,6 +2013,14 @@ platform :ios do
 
   desc "CI lane: fetch data, build iOS, and distribute to Firebase"
   lane :ci_ios do
+    fetch_data
+    build_ios
+    firebase_ios
+  end
+
+  # Use this lane for one-shot local release to Firebase App Distribution.
+  desc "Local lane: build iOS and upload directly to Firebase App Distribution"
+  lane :release_ios_to_firebase do
     fetch_data
     build_ios
     firebase_ios

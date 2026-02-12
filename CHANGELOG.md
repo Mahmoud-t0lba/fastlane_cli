@@ -1,3 +1,15 @@
+## 0.1.5
+
+- Added Firebase App Distribution group setup during `init`/`firebase-sync`:
+  can resolve group aliases and create missing groups automatically.
+- Added new flags for App Distribution setup:
+  `--appdist-groups`, `--appdist-skip-group-setup`, and `--skip-group-setup`.
+- Updated metadata payload so `build_data.json` now includes:
+  `app.version` and `app.version_source` from `pubspec.yaml`.
+- Improved generated Fastfile with direct one-shot local lanes:
+  `release_android_to_firebase` and `release_ios_to_firebase`.
+- Updated README with full command/flow details for build + direct Firebase distribution.
+
 ## 0.1.4
 
 - Added interactive Firebase project resolution for `init`/`firebase-sync`:

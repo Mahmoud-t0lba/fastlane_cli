@@ -9,6 +9,7 @@ It can:
 - fetch project/git/GitHub metadata JSON
 - sync Firebase app/project data into your project files
 - run Firebase login and FlutterFire configuration automatically
+- auto-setup Firebase App Distribution groups (create if missing)
 
 ## Install
 
@@ -61,6 +62,8 @@ Common flags:
 - `--firebase-project <project-id>`: use explicit Firebase project id
 - `--firebase-output-path <path>`: firebase JSON output path
 - `--output-path <path>`: build metadata JSON output path
+- `--appdist-groups <aliases>`: comma-separated tester groups (example: `qa,beta`)
+- `--appdist-skip-group-setup`: skip App Distribution group create/check step
 - `--no-include-github`: skip GitHub API metadata
 - `--firebase-optional`: do not fail hard if Firebase is not available
 
@@ -100,6 +103,8 @@ Common flags:
 - `--no-update-env`
 - `--overwrite`
 - `--optional`
+- `--appdist-groups <aliases>`
+- `--skip-group-setup`
 
 ### `fetch-data`
 
@@ -116,6 +121,13 @@ Common flags:
 - `--include-github` / `--no-include-github`
 - `--github-repository owner/repo`
 - `--github-token <token>`
+
+`build_data.json` app section reads directly from `pubspec.yaml`:
+
+- `app.version` (raw value, e.g. `1.2.3+45`)
+- `app.version_name`
+- `app.version_code`
+- `app.version_source` (`pubspec.yaml`)
 
 ## Firebase Interactive Flow
 
@@ -135,9 +147,25 @@ When running `init` or `firebase-sync`:
    - if exists, continues
    - if missing, adds it automatically (`flutter pub add firebase_core`), with fallback file update
 7. Runs `flutterfire configure --project <projectId> --yes`.
-8. Writes:
+8. Resolves App Distribution groups from `--appdist-groups`, env, or defaults (`qa`), then creates missing groups automatically.
+9. Writes:
    - `fastlane/firebase_data.json`
    - updates `fastlane/.env.default`
+
+## Direct Build + Upload To Firebase App Distribution
+
+After `flc init`, run from your app project:
+
+```bash
+fastlane android release_android_to_firebase
+fastlane ios release_ios_to_firebase
+```
+
+These lanes:
+
+1. refresh data (`fetch_data`)
+2. build release artifact
+3. upload direct to Firebase App Distribution
 
 ## Generated/Updated Files
 

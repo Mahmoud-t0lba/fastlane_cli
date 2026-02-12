@@ -102,8 +102,10 @@ void main() {
       final identifiers = payload['identifiers'] as Map<String, dynamic>;
 
       expect(app['name'], 'demo_app');
+      expect(app['version'], '2.1.0+13');
       expect(app['version_name'], '2.1.0');
       expect(app['version_code'], '13');
+      expect(app['version_source'], 'pubspec.yaml');
       expect(identifiers['ios_bundle_id'], 'com.example.demo');
       expect(identifiers['android_package_name'], 'com.example.demo');
       expect(payload.containsKey('github'), isFalse);
@@ -402,6 +404,44 @@ void main() {
         File(p.join(tempDir.path, '.firebaserc')).readAsStringSync(),
         contains('"default": "menu-created-project"'),
       );
+    });
+
+    test('firebase-sync creates missing App Distribution groups', () async {
+      final tempDir =
+          await Directory.systemTemp.createTemp('fl_config_fb_groups_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      cli = FastlaneConfiguratorCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunnerAppDistributionGroups(),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'demo-project',
+        '--appdist-groups',
+        'qa,beta',
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+      expect(
+        logs.join('\n'),
+        contains('Created Firebase App Distribution group "qa".'),
+      );
+      expect(
+        logs.join('\n'),
+        contains('Created Firebase App Distribution group "beta".'),
+      );
+
+      final envContent = File(p.join(tempDir.path, 'fastlane', '.env.default'))
+          .readAsStringSync();
+      expect(envContent, contains('FIREBASE_TESTER_GROUPS=beta,qa'));
     });
   });
 }
@@ -926,6 +966,110 @@ ProcessRunner _mockProcessRunnerSelectCreateProject() {
           }),
           '',
         );
+      }
+    }
+
+    if (executable == 'flutterfire' &&
+        arguments.length >= 4 &&
+        arguments.first == 'configure') {
+      return ProcessResult(1, 0, 'flutterfire configured', '');
+    }
+
+    if (executable == 'git') {
+      return ProcessResult(1, 1, '', 'not a git repository');
+    }
+
+    return ProcessResult(1, 1, '', 'command not mocked');
+  };
+}
+
+ProcessRunner _mockProcessRunnerAppDistributionGroups() {
+  return (
+    String executable,
+    List<String> arguments, {
+    String? workingDirectory,
+  }) async {
+    if (executable == 'firebase') {
+      if (arguments.length >= 2 &&
+          arguments.first == 'login:list' &&
+          arguments[1] == '--json') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[
+              <String, String>{'user': 'tester@example.com'},
+            ],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.length >= 2 &&
+          arguments.first == 'use' &&
+          arguments[1] == 'demo-project') {
+        return ProcessResult(1, 0, 'Now using project demo-project', '');
+      }
+
+      if (arguments.isNotEmpty && arguments.first == 'apps:list') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[
+              <String, String>{
+                'appId': '1:123:android:abc',
+                'platform': 'ANDROID',
+                'displayName': 'Android App',
+                'packageName': 'com.example.demo',
+              },
+              <String, String>{
+                'appId': '1:123:ios:def',
+                'platform': 'IOS',
+                'displayName': 'iOS App',
+                'bundleId': 'com.example.demo',
+              },
+            ],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.isNotEmpty && arguments.first == 'projects:list') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[
+              <String, String>{
+                'projectId': 'demo-project',
+                'projectNumber': '1234567890',
+              },
+            ],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.isNotEmpty &&
+          arguments.first == 'appdistribution:group:list') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.isNotEmpty &&
+          arguments.first == 'appdistribution:group:create') {
+        return ProcessResult(1, 0, 'Group created', '');
       }
     }
 
