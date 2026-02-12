@@ -292,6 +292,76 @@ void main() {
       expect(
           envContent, contains('FIREBASE_PROJECT_ID=created-firebase-project'));
     });
+
+    test(
+        'firebase-sync ignores placeholder project id and falls back to create flow',
+        () async {
+      final tempDir =
+          await Directory.systemTemp.createTemp('fl_config_fb_placeholder_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      cli = FastlaneConfiguratorCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunnerCreateProject(),
+        promptReader: _mockPromptReader(<String>[
+          'yes',
+          'created-firebase-project',
+          'Created Firebase Project',
+        ]),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'your-firebase-project-id',
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+      expect(
+        logs.join('\n'),
+        contains('looks like a placeholder. Trying auto-detection instead'),
+      );
+      expect(logs.join('\n'),
+          contains('Firebase project created: created-firebase-project'));
+    });
+
+    test('firebase-sync selects an existing Firebase project when unlinked',
+        () async {
+      final tempDir =
+          await Directory.systemTemp.createTemp('fl_config_fb_select_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      cli = FastlaneConfiguratorCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunnerSelectExistingProject(),
+        promptReader: _mockPromptReader(<String>['2']),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+      expect(logs.join('\n'), contains('Select Firebase project to use:'));
+      expect(
+        File(p.join(tempDir.path, '.firebaserc')).readAsStringSync(),
+        contains('"default": "second-project"'),
+      );
+
+      final envContent = File(p.join(tempDir.path, 'fastlane', '.env.default'))
+          .readAsStringSync();
+      expect(envContent, contains('FIREBASE_PROJECT_ID=second-project'));
+    });
   });
 }
 
@@ -515,6 +585,8 @@ ProcessRunner _mockProcessRunnerReconnectFirstFailure() {
 }
 
 ProcessRunner _mockProcessRunnerCreateProject() {
+  var projectCreated = false;
+
   return (
     String executable,
     List<String> arguments, {
@@ -546,6 +618,7 @@ ProcessRunner _mockProcessRunnerCreateProject() {
       if (arguments.length >= 2 &&
           arguments.first == 'projects:create' &&
           arguments[1] == 'created-firebase-project') {
+        projectCreated = true;
         return ProcessResult(1, 0, 'Project created', '');
       }
 
@@ -587,10 +660,110 @@ ProcessRunner _mockProcessRunnerCreateProject() {
           0,
           jsonEncode(<String, Object?>{
             'status': 'success',
+            'result': projectCreated
+                ? <Map<String, String>>[
+                    <String, String>{
+                      'projectId': 'created-firebase-project',
+                      'projectNumber': '999999999',
+                    },
+                  ]
+                : <Map<String, String>>[],
+          }),
+          '',
+        );
+      }
+    }
+
+    if (executable == 'flutterfire' &&
+        arguments.length >= 4 &&
+        arguments.first == 'configure') {
+      return ProcessResult(1, 0, 'flutterfire configured', '');
+    }
+
+    if (executable == 'git') {
+      return ProcessResult(1, 1, '', 'not a git repository');
+    }
+
+    return ProcessResult(1, 1, '', 'command not mocked');
+  };
+}
+
+ProcessRunner _mockProcessRunnerSelectExistingProject() {
+  return (
+    String executable,
+    List<String> arguments, {
+    String? workingDirectory,
+  }) async {
+    if (executable == 'firebase') {
+      if (arguments.length >= 2 &&
+          arguments.first == 'login:list' &&
+          arguments[1] == '--json') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[
+              <String, String>{'user': 'tester@example.com'},
+            ],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.length >= 2 &&
+          arguments.first == 'use' &&
+          arguments[1] == '--json') {
+        return ProcessResult(1, 1, '', 'No active Firebase project');
+      }
+
+      if (arguments.length >= 2 &&
+          arguments.first == 'use' &&
+          arguments[1] == 'second-project') {
+        return ProcessResult(1, 0, 'Now using project second-project', '');
+      }
+
+      if (arguments.isNotEmpty && arguments.first == 'projects:list') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
             'result': <Map<String, String>>[
               <String, String>{
-                'projectId': 'created-firebase-project',
-                'projectNumber': '999999999',
+                'projectId': 'first-project',
+                'projectNumber': '111111111',
+                'displayName': 'First Project',
+              },
+              <String, String>{
+                'projectId': 'second-project',
+                'projectNumber': '222222222',
+                'displayName': 'Second Project',
+              },
+            ],
+          }),
+          '',
+        );
+      }
+
+      if (arguments.isNotEmpty && arguments.first == 'apps:list') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(<String, Object?>{
+            'status': 'success',
+            'result': <Map<String, String>>[
+              <String, String>{
+                'appId': '1:222:android:sel',
+                'platform': 'ANDROID',
+                'displayName': 'Android Selected',
+                'packageName': 'com.example.selected',
+              },
+              <String, String>{
+                'appId': '1:222:ios:sel',
+                'platform': 'IOS',
+                'displayName': 'iOS Selected',
+                'bundleId': 'com.example.selected',
               },
             ],
           }),

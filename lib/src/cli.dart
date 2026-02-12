@@ -968,7 +968,53 @@ ${commandParser.usage}
     final resolved =
         await _resolveFirebaseProject(projectRoot, firebaseProject);
     if (resolved != null) {
+      final exists = await _firebaseProjectExists(
+        projectRoot: projectRoot,
+        projectId: resolved,
+      );
+      if (exists != false) {
+        return resolved;
+      }
+
+      final selected = await _selectFirebaseProjectFromAccount(
+        projectRoot: projectRoot,
+      );
+      if (selected != null) {
+        return selected;
+      }
+
+      if (optional) {
+        return null;
+      }
+      _out('Firebase project "$resolved" was not found in your account.');
+      final createResolved = _promptYesNo(
+        'Create Firebase project "$resolved" now? (yes/no): ',
+      );
+      if (!createResolved) {
+        throw Exception(
+          'Firebase project "$resolved" is not available. '
+          'Use a valid --firebase-project value.',
+        );
+      }
+
+      final suggestedDisplayName = _suggestFirebaseDisplayName(projectRoot);
+      final enteredDisplayName = _stringValue(
+        _promptReader('Firebase display name [$suggestedDisplayName]: '),
+      );
+      final displayName = enteredDisplayName ?? suggestedDisplayName;
+      await _createFirebaseProject(
+        projectRoot: projectRoot,
+        projectId: resolved,
+        displayName: displayName,
+      );
       return resolved;
+    }
+
+    final selected = await _selectFirebaseProjectFromAccount(
+      projectRoot: projectRoot,
+    );
+    if (selected != null) {
+      return selected;
     }
 
     if (optional) {
@@ -994,6 +1040,26 @@ ${commandParser.usage}
     );
     final displayName = enteredDisplayName ?? suggestedDisplayName;
 
+    await _createFirebaseProject(
+      projectRoot: projectRoot,
+      projectId: projectId,
+      displayName: displayName,
+    );
+    return projectId;
+  }
+
+  Future<void> _createFirebaseProject({
+    required String projectRoot,
+    required String projectId,
+    required String displayName,
+  }) async {
+    if (_looksLikePlaceholderFirebaseProject(projectId)) {
+      throw Exception(
+        'Invalid Firebase project id "$projectId". '
+        'Replace placeholders with a real project id.',
+      );
+    }
+
     _out('Creating Firebase project "$projectId"...');
     final createResult = await _runCommand(
       'firebase',
@@ -1014,7 +1080,130 @@ ${commandParser.usage}
     }
 
     _out('Firebase project created: $projectId');
-    return projectId;
+  }
+
+  Future<String?> _selectFirebaseProjectFromAccount({
+    required String projectRoot,
+  }) async {
+    final projects = await _listFirebaseProjects(projectRoot);
+    if (projects == null || projects.isEmpty) {
+      return null;
+    }
+
+    if (projects.length == 1) {
+      final projectId = projects.first['projectId']!;
+      _out('Using Firebase project "$projectId" from your account.');
+      return projectId;
+    }
+
+    _out('Select Firebase project to use:');
+    for (var i = 0; i < projects.length; i++) {
+      final project = projects[i];
+      final projectId = project['projectId']!;
+      final displayName = project['displayName'];
+      final displaySuffix =
+          displayName == null ? '' : ' (${displayName.trim()})';
+      _out('${i + 1}) $projectId$displaySuffix');
+    }
+
+    final answer = _stringValue(
+      _promptReader(
+        'Enter project number or project id (leave empty to skip): ',
+      ),
+    );
+    if (answer == null) {
+      return null;
+    }
+
+    final index = int.tryParse(answer);
+    if (index != null && index >= 1 && index <= projects.length) {
+      return projects[index - 1]['projectId'];
+    }
+
+    for (final project in projects) {
+      if (project['projectId'] == answer) {
+        return answer;
+      }
+    }
+
+    _out('Invalid Firebase project selection: "$answer".');
+    return null;
+  }
+
+  Future<List<Map<String, String?>>?> _listFirebaseProjects(
+    String projectRoot,
+  ) async {
+    final projectsResponse = await _runCommand(
+      'firebase',
+      const <String>['projects:list', '--json'],
+      projectRoot,
+      optional: true,
+    );
+    if (projectsResponse == null || projectsResponse.exitCode != 0) {
+      return null;
+    }
+
+    final decoded = _decodeJsonOrEmpty(projectsResponse.stdout.toString());
+    return _extractFirebaseProjects(decoded);
+  }
+
+  Future<bool?> _firebaseProjectExists({
+    required String projectRoot,
+    required String projectId,
+  }) async {
+    final projects = await _listFirebaseProjects(projectRoot);
+    if (projects == null) {
+      return null;
+    }
+
+    for (final project in projects) {
+      if (project['projectId'] == projectId) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  List<Map<String, String?>> _extractFirebaseProjects(dynamic decoded) {
+    final projects = <Map<String, String?>>[];
+
+    void addProjectsFromList(dynamic rawList) {
+      if (rawList is! List) {
+        return;
+      }
+      for (final entry in rawList.whereType<Map>()) {
+        final map = Map<String, dynamic>.from(entry);
+        final projectId =
+            _stringValue(map['projectId']) ?? _stringValue(map['project_id']);
+        if (projectId == null) {
+          continue;
+        }
+        projects.add(<String, String?>{
+          'projectId': projectId,
+          'displayName': _stringValue(map['displayName']),
+        });
+      }
+    }
+
+    if (decoded is Map<String, dynamic>) {
+      addProjectsFromList(decoded['result']);
+      addProjectsFromList(decoded['projects']);
+    } else {
+      addProjectsFromList(decoded);
+    }
+
+    return projects;
+  }
+
+  bool _looksLikePlaceholderFirebaseProject(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized == 'your-firebase-project-id' ||
+        normalized == 'your-project-id' ||
+        normalized == 'your_project_id' ||
+        normalized == 'firebase-project-id' ||
+        normalized.contains('<') ||
+        normalized.contains('>');
   }
 
   bool _promptYesNo(String prompt) {
@@ -1120,14 +1309,28 @@ ${commandParser.usage}
   ) async {
     final explicit = _stringValue(firebaseProject);
     if (explicit != null) {
-      return explicit;
+      if (_looksLikePlaceholderFirebaseProject(explicit)) {
+        _out(
+          'The provided Firebase project id "$explicit" looks like a placeholder. '
+          'Trying auto-detection instead.',
+        );
+      } else {
+        return explicit;
+      }
     }
 
-    final envProject =
+    final envProjectFromCli =
         _stringValue(Platform.environment['FIREBASE_PROJECT_ID']) ??
             _stringValue(Platform.environment['GCLOUD_PROJECT']);
-    if (envProject != null) {
-      return envProject;
+    if (envProjectFromCli != null &&
+        !_looksLikePlaceholderFirebaseProject(envProjectFromCli)) {
+      return envProjectFromCli;
+    }
+    if (envProjectFromCli != null) {
+      _out(
+        'The environment Firebase project id "$envProjectFromCli" looks like a placeholder. '
+        'Trying auto-detection instead.',
+      );
     }
 
     final useCommand = await _runCommand(
@@ -1144,11 +1347,15 @@ ${commandParser.usage}
     if (decoded is Map<String, dynamic>) {
       final result = decoded['result'];
       if (result is String && result.trim().isNotEmpty) {
-        return result.trim();
+        final projectId = result.trim();
+        if (_looksLikePlaceholderFirebaseProject(projectId)) {
+          return null;
+        }
+        return projectId;
       }
       if (result is Map<String, dynamic>) {
         final project = _stringValue(result['projectId']);
-        if (project != null) {
+        if (project != null && !_looksLikePlaceholderFirebaseProject(project)) {
           return project;
         }
       }
