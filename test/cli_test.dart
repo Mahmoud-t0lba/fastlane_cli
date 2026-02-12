@@ -6,15 +6,15 @@ import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
-  group('FastlaneConfiguratorCli', () {
+  group('FastlaneCli', () {
     late List<String> logs;
     late List<String> errors;
-    late FastlaneConfiguratorCli cli;
+    late FastlaneCli cli;
 
     setUp(() {
       logs = <String>[];
       errors = <String>[];
-      cli = FastlaneConfiguratorCli(out: logs.add, err: errors.add);
+      cli = FastlaneCli(out: logs.add, err: errors.add);
     });
 
     test('setup generates fastlane and workflow files', () async {
@@ -118,7 +118,7 @@ void main() {
       final tempDir = await Directory.systemTemp.createTemp('fl_config_fb_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunner(),
@@ -177,7 +177,7 @@ void main() {
         'android { defaultConfig { applicationId = "com.example.demo" } }\n',
       );
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunner(),
@@ -225,7 +225,7 @@ void main() {
           await Directory.systemTemp.createTemp('fl_config_fb_reconnect_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerReconnectFirstFailure(),
@@ -263,7 +263,7 @@ void main() {
           await Directory.systemTemp.createTemp('fl_config_fb_create_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerCreateProject(),
@@ -305,7 +305,7 @@ void main() {
           await Directory.systemTemp.createTemp('fl_config_fb_placeholder_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerCreateProject(),
@@ -341,7 +341,7 @@ void main() {
           await Directory.systemTemp.createTemp('fl_config_fb_select_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerSelectExistingProject(),
@@ -375,7 +375,7 @@ void main() {
       );
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerSelectCreateProject(),
@@ -411,7 +411,7 @@ void main() {
           await Directory.systemTemp.createTemp('fl_config_fb_groups_');
       addTearDown(() async => tempDir.delete(recursive: true));
 
-      cli = FastlaneConfiguratorCli(
+      cli = FastlaneCli(
         out: logs.add,
         err: errors.add,
         processRunner: _mockProcessRunnerAppDistributionGroups(),

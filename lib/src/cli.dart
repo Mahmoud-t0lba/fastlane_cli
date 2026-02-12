@@ -21,12 +21,18 @@ typedef ProcessRunner = Future<ProcessResult> Function(
 /// Prompts the user and returns one-line input.
 typedef PromptReader = String? Function(String prompt);
 
+@Deprecated('Use FastlaneCli instead.')
+typedef FastlaneConfiguratorCli = FastlaneCli;
+
 /// CLI entrypoint for generating and syncing Fastlane/Firebase configuration.
-class FastlaneConfiguratorCli {
+///
+/// Backward compatibility:
+/// `FastlaneConfiguratorCli` remains available as a deprecated type alias.
+class FastlaneCli {
   /// Creates a new CLI runner.
   ///
   /// Optional dependencies can be injected for custom output and testing.
-  FastlaneConfiguratorCli({
+  FastlaneCli({
     LineWriter? out,
     LineWriter? err,
     http.Client? httpClient,

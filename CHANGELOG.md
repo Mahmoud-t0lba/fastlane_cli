@@ -1,3 +1,8 @@
+## 0.1.7
+
+- Updated package links to the renamed GitHub repository: `Mahmoud-t0lba/fastlane_cli`.
+- Published maintenance release to keep `pub.dev` metadata aligned with `fastlane_cli`.
+
 ## 0.1.6
 
 - Renamed package to `fastlane_cli`.
