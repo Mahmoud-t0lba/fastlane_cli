@@ -73,6 +73,9 @@ void main() {
       final fastfileContent = File(
         p.join(tempDir.path, 'fastlane', 'Fastfile'),
       ).readAsStringSync();
+      final envDefaultContent = File(
+        p.join(tempDir.path, 'fastlane', '.env.default'),
+      ).readAsStringSync();
       expect(fastfileContent, contains('lane :ci_android'));
       expect(fastfileContent, contains('lane :ci_ios'));
       expect(fastfileContent, contains('lane :bootstrap_cli_env'));
@@ -86,6 +89,38 @@ void main() {
         fastfileContent,
         contains('args = ["bash", "scripts/apple_account_info.sh"]'),
       );
+      expect(
+        fastfileContent,
+        contains(
+            'sh("flc", "firebase-sync", "--project-root", "..", "--output-path", "fastlane/firebase_data.json"'),
+      );
+      expect(
+        fastfileContent,
+        contains(
+          'Dir[flutter_project_file("build", "app", "outputs", "flutter-apk", "*.apk")]',
+        ),
+      );
+      expect(
+        fastfileContent,
+        contains('Dir[flutter_project_file("build", "ios", "ipa", "*.ipa")]'),
+      );
+      expect(
+        fastfileContent,
+        contains('lane :build_android_apk do |options|'),
+      );
+      expect(
+        fastfileContent,
+        contains('resolve_android_build_mode(options)'),
+      );
+      expect(
+        fastfileContent,
+        contains('bump_pubspec_build_if_matches_firebase'),
+      );
+      expect(
+        fastfileContent,
+        contains('build_android_apk(build_mode: options[:build_mode])'),
+      );
+      expect(envDefaultContent, contains('FIREBASE_TESTER_GROUPS=testers'));
       expect(logs.join('\n'), contains('Setup complete'));
     });
 
@@ -184,6 +219,113 @@ void main() {
       expect(envContent,
           contains('FASTLANE_ANDROID_PACKAGE_NAME=com.example.demo'));
       expect(envContent, contains('FASTLANE_APP_IDENTIFIER=com.example.demo'));
+    });
+
+    test('firebase-sync adds Firebase initialization to main.dart when missing',
+        () async {
+      final tempDir =
+          await Directory.systemTemp.createTemp('fl_config_fb_main_init_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      _writeFile(
+        p.join(tempDir.path, 'pubspec.yaml'),
+        'name: demo_app\nversion: 1.0.0+1\n',
+      );
+      _writeFile(
+        p.join(tempDir.path, 'lib', 'main.dart'),
+        '''
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const Placeholder());
+}
+''',
+      );
+
+      cli = FastlaneCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunner(),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'demo-project',
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+
+      final mainContent =
+          File(p.join(tempDir.path, 'lib', 'main.dart')).readAsStringSync();
+      expect(
+        mainContent,
+        contains("import 'package:firebase_core/firebase_core.dart';"),
+      );
+      expect(mainContent, contains('main() async {'));
+      expect(
+        mainContent,
+        contains('WidgetsFlutterBinding.ensureInitialized();'),
+      );
+      expect(mainContent, contains('await Firebase.initializeApp();'));
+      expect(logs.join('\n'), contains('Added Firebase initialization'));
+    });
+
+    test(
+        'firebase-sync does not duplicate Firebase initialization in main.dart',
+        () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'fl_config_fb_main_init_existing_',
+      );
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      _writeFile(
+        p.join(tempDir.path, 'pubspec.yaml'),
+        'name: demo_app\nversion: 1.0.0+1\n',
+      );
+      _writeFile(
+        p.join(tempDir.path, 'lib', 'main.dart'),
+        '''
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(const Placeholder());
+}
+''',
+      );
+
+      cli = FastlaneCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunner(),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'demo-project',
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+
+      final mainContent =
+          File(p.join(tempDir.path, 'lib', 'main.dart')).readAsStringSync();
+      expect(_countOccurrences(mainContent, 'Firebase.initializeApp('), 1);
+      expect(
+        logs.join('\n'),
+        contains('Firebase initialization already exists in lib/main.dart'),
+      );
     });
 
     test('init runs setup + firebase-sync + fetch-data in one command',
@@ -477,6 +619,20 @@ void _writeFile(String path, String content) {
   final file = File(path);
   file.parent.createSync(recursive: true);
   file.writeAsStringSync(content);
+}
+
+int _countOccurrences(String value, String pattern) {
+  var count = 0;
+  var start = 0;
+  while (true) {
+    final index = value.indexOf(pattern, start);
+    if (index == -1) {
+      break;
+    }
+    count++;
+    start = index + pattern.length;
+  }
+  return count;
 }
 
 ProcessRunner _mockProcessRunner() {

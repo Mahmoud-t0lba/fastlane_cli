@@ -1,3 +1,13 @@
+## 0.1.10
+
+- Added automatic `Firebase.initializeApp` injection in `lib/main.dart` during
+  `firebase-sync` when initialization is missing.
+- Fixed generated Fastfile paths so commands run correctly from the `fastlane/`
+  working directory (`project-root ..`, correct output/artifact paths).
+- Changed default App Distribution group from `qa` to `testers`.
+- Updated Android local Firebase release lane to build/distribute APK by default
+  (with AAB fallback) for simpler App Distribution onboarding.
+
 ## 0.1.9
 
 - Fixed generated Fastfile script paths for `bootstrap_cli_env` and

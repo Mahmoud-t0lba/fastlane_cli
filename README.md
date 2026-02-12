@@ -62,7 +62,7 @@ Common flags:
 - `--firebase-project <project-id>`: use explicit Firebase project id
 - `--firebase-output-path <path>`: firebase JSON output path
 - `--output-path <path>`: build metadata JSON output path
-- `--appdist-groups <aliases>`: comma-separated tester groups (example: `qa,beta`)
+- `--appdist-groups <aliases>`: comma-separated tester groups (example: `testers,beta`)
 - `--appdist-skip-group-setup`: skip App Distribution group create/check step
 - `--no-include-github`: skip GitHub API metadata
 - `--firebase-optional`: do not fail hard if Firebase is not available
@@ -147,7 +147,7 @@ When running `init` or `firebase-sync`:
    - if exists, continues
    - if missing, adds it automatically (`flutter pub add firebase_core`), with fallback file update
 7. Runs `flutterfire configure --project <projectId> --yes`.
-8. Resolves App Distribution groups from `--appdist-groups`, env, or defaults (`qa`), then creates missing groups automatically.
+8. Resolves App Distribution groups from `--appdist-groups`, env, or defaults (`testers`), then creates missing groups automatically.
 9. Writes:
    - `fastlane/firebase_data.json`
    - updates `fastlane/.env.default`

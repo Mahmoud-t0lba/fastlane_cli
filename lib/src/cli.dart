@@ -639,6 +639,7 @@ ${commandParser.usage}
       projectId: resolvedProject,
       optional: true,
     );
+    await _ensureFirebaseInitializationInMain(projectRoot: projectRoot);
 
     final resolvedGroupAliases = _resolveAppDistributionGroupAliases(
       envPath: envPath,
@@ -1340,6 +1341,119 @@ ${commandParser.usage}
     _out('Added firebase_core to pubspec.yaml using file fallback.');
   }
 
+  Future<void> _ensureFirebaseInitializationInMain({
+    required String projectRoot,
+  }) async {
+    final mainFile = File(p.join(projectRoot, 'lib', 'main.dart'));
+    if (!mainFile.existsSync()) {
+      return;
+    }
+
+    var content = mainFile.readAsStringSync();
+    if (content.contains('Firebase.initializeApp(')) {
+      _out('Firebase initialization already exists in lib/main.dart');
+      return;
+    }
+
+    final mainRegex = RegExp(r'\bmain\s*\([^)]*\)\s*(async\s*)?\{');
+    var mainMatch = mainRegex.firstMatch(content);
+    if (mainMatch == null) {
+      _out('Could not find main() in lib/main.dart. Skipping initialization.');
+      return;
+    }
+
+    content = _ensureImport(
+      content,
+      "import 'package:firebase_core/firebase_core.dart';",
+    );
+
+    final firebaseOptionsFile = File(
+      p.join(projectRoot, 'lib', 'firebase_options.dart'),
+    );
+    final hasFirebaseOptions = firebaseOptionsFile.existsSync();
+    if (hasFirebaseOptions) {
+      content = _ensureImport(
+        content,
+        "import 'firebase_options.dart';",
+      );
+    }
+
+    // Imports can shift source offsets, so refresh the main() match.
+    mainMatch = mainRegex.firstMatch(content);
+    if (mainMatch == null) {
+      _out('Could not find main() in lib/main.dart. Skipping initialization.');
+      return;
+    }
+
+    // `await Firebase.initializeApp` requires async main.
+    final hasAsyncKeyword = mainMatch.group(1)?.trim().isNotEmpty ?? false;
+    if (!hasAsyncKeyword) {
+      final declaration = content.substring(mainMatch.start, mainMatch.end);
+      final braceIndex = declaration.lastIndexOf('{');
+      if (braceIndex == -1) {
+        _out('Could not patch main() signature. Skipping initialization.');
+        return;
+      }
+      final asyncDeclaration =
+          '${declaration.substring(0, braceIndex).trimRight()} async {';
+      content = content.replaceRange(
+        mainMatch.start,
+        mainMatch.end,
+        asyncDeclaration,
+      );
+      mainMatch = mainRegex.firstMatch(content);
+      if (mainMatch == null) {
+        _out('Could not patch main() signature. Skipping initialization.');
+        return;
+      }
+    } else {
+      mainMatch = mainRegex.firstMatch(content);
+      if (mainMatch == null) {
+        _out('Could not patch main() body. Skipping initialization.');
+        return;
+      }
+    }
+
+    final initializeCall = hasFirebaseOptions
+        ? 'await Firebase.initializeApp(\n'
+            '    options: DefaultFirebaseOptions.currentPlatform,\n'
+            '  );'
+        : 'await Firebase.initializeApp();';
+    final initializationBlock = '\n'
+        '  WidgetsFlutterBinding.ensureInitialized();\n'
+        '  $initializeCall\n';
+
+    content = content.replaceRange(
+      mainMatch.end,
+      mainMatch.end,
+      initializationBlock,
+    );
+    mainFile.writeAsStringSync(content);
+    _out('Added Firebase initialization to lib/main.dart');
+  }
+
+  String _ensureImport(String content, String importLine) {
+    if (content.contains(importLine)) {
+      return content;
+    }
+
+    final lines = content.split('\n');
+    var lastImportLine = -1;
+    for (var i = 0; i < lines.length; i++) {
+      final trimmed = lines[i].trim();
+      if (trimmed.startsWith('import ') && trimmed.endsWith(';')) {
+        lastImportLine = i;
+      }
+    }
+
+    if (lastImportLine == -1) {
+      return '$importLine\n\n$content';
+    }
+
+    lines.insert(lastImportLine + 1, importLine);
+    return lines.join('\n');
+  }
+
   bool _pubspecHasFirebaseCoreDependency(String content) {
     try {
       final decoded = loadYaml(content);
@@ -1413,7 +1527,7 @@ ${commandParser.usage}
       }
     }
 
-    raw ??= 'qa';
+    raw ??= 'testers';
 
     final aliases = <String>{};
     for (final entry in raw.split(',')) {
@@ -1932,10 +2046,21 @@ ${commandParser.usage}
 # - fastlane android release_android_to_firebase
 # - fastlane ios release_ios_to_firebase
 
+require "json"
+require "net/http"
+
 default_platform(:android)
 
+def flutter_project_root
+  File.expand_path("..", __dir__)
+end
+
+def flutter_project_file(*parts)
+  File.join(flutter_project_root, *parts)
+end
+
 def env_value_from_fastlane_files(key)
-  ["fastlane/.env", "fastlane/.env.default"].each do |path|
+  [".env", ".env.default", "fastlane/.env", "fastlane/.env.default"].each do |path|
     next unless File.exist?(path)
 
     File.foreach(path) do |line|
@@ -1948,6 +2073,106 @@ def env_value_from_fastlane_files(key)
   end
 
   ""
+end
+
+def firebase_tools_config_path
+  xdg_config_home = ENV["XDG_CONFIG_HOME"]
+  base = xdg_config_home.to_s.empty? ? "~/.config" : xdg_config_home
+  File.expand_path(File.join(base, "configstore", "firebase-tools.json"))
+end
+
+def firebase_cli_access_token
+  path = firebase_tools_config_path
+  return "" unless File.exist?(path)
+
+  data = JSON.parse(File.read(path))
+  data.dig("tokens", "access_token").to_s
+rescue JSON::ParserError
+  ""
+end
+
+def read_pubspec_version_info
+  pubspec_path = flutter_project_file("pubspec.yaml")
+  content = File.read(pubspec_path)
+  match = content.match(/^version:\s*([^\s]+)\s*\$/)
+  UI.user_error!("pubspec.yaml is missing a valid version line") unless match
+
+  raw_version = match[1]
+  display_version, build_version = raw_version.split("+", 2)
+  build_version = "1" if build_version.to_s.empty?
+
+  {
+    pubspec_path: pubspec_path,
+    content: content,
+    raw_version: raw_version,
+    display_version: display_version,
+    build_version: build_version
+  }
+end
+
+def latest_firebase_release(app_id, project_id)
+  return nil if app_id.to_s.empty?
+
+  project_number = app_id.to_s.split(":")[1].to_s
+  return nil if project_number.empty?
+
+  unless project_id.to_s.empty?
+    sh("firebase", "apps:list", "--project", project_id, "--json", "--non-interactive")
+  end
+
+  token = firebase_cli_access_token
+  return nil if token.empty?
+
+  url = URI("https://firebaseappdistribution.googleapis.com/v1/projects/#{project_number}/apps/#{app_id}/releases?pageSize=1")
+  request = Net::HTTP::Get.new(url)
+  request["Authorization"] = "Bearer #{token}"
+  response = Net::HTTP.start(url.hostname, url.port, use_ssl: true) { |http| http.request(request) }
+
+  return nil unless response.code.to_i == 200
+
+  payload = JSON.parse(response.body)
+  release = payload.fetch("releases", []).first
+  return nil unless release
+
+  {
+    display_version: release["displayVersion"].to_s,
+    build_version: release["buildVersion"].to_s
+  }
+rescue JSON::ParserError
+  nil
+end
+
+def bump_pubspec_build_if_matches_firebase(app_id:, project_id:)
+  return if app_id.to_s.empty?
+
+  local = read_pubspec_version_info
+  remote = latest_firebase_release(app_id, project_id)
+  return unless remote
+
+  if remote[:display_version] == local[:display_version] && remote[:build_version] == local[:build_version]
+    current_build = Integer(local[:build_version], exception: false)
+    UI.user_error!("pubspec build version must be an integer (found #{local[:build_version]})") if current_build.nil?
+
+    new_version = "#{local[:display_version]}+#{current_build + 1}"
+    updated_content = local[:content].sub(/^version:\s*[^\s]+\s*\$/, "version: #{new_version}")
+    File.write(local[:pubspec_path], updated_content)
+    UI.important("Updated pubspec version from #{local[:raw_version]} to #{new_version} because it already exists on Firebase.")
+  end
+end
+
+def resolve_android_build_mode(options)
+  mode = options[:build_mode].to_s.strip.downcase
+  mode = ENV["ANDROID_BUILD_MODE"].to_s.strip.downcase if mode.empty?
+
+  if mode.empty? && STDIN.tty? && ENV["CI"].to_s.empty?
+    UI.message("Choose Android build mode [release/debug] (default: release):")
+    input = STDIN.gets.to_s.strip.downcase
+    mode = input unless input.empty?
+  end
+
+  mode = "release" unless %w[release debug].include?(mode)
+  UI.message("Using Android build mode: #{mode}")
+  mode
 end
 
 desc "Populate fastlane/.env secrets from local CLI sessions"
@@ -1966,8 +2191,8 @@ end
 desc "Fetch Firebase + project metadata and write JSON files for CI"
 lane :fetch_data do
   bootstrap_cli_env
-  sh("flc", "firebase-sync", "--project-root", ".", "--output-path", "fastlane/firebase_data.json", "--update-env", "--overwrite", "--optional")
-  fetch_args = ["fastlane_cli", "fetch-data", "--project-root", ".", "--output-path", "fastlane/build_data.json", "--include-github"]
+  sh("flc", "firebase-sync", "--project-root", "..", "--output-path", "fastlane/firebase_data.json", "--update-env", "--overwrite", "--optional")
+  fetch_args = ["fastlane_cli", "fetch-data", "--project-root", "..", "--output-path", "fastlane/build_data.json", "--include-github"]
   github_repository = env_value_from_fastlane_files("GITHUB_REPOSITORY")
   github_token = env_value_from_fastlane_files("GITHUB_TOKEN")
   fetch_args += ["--github-repository", github_repository] unless github_repository.to_s.empty?
@@ -1982,11 +2207,26 @@ platform :android do
     sh("flutter", "build", "appbundle", "--release")
   end
 
+  desc "Build Android APK (release/debug) for Firebase distribution"
+  lane :build_android_apk do |options|
+    mode = resolve_android_build_mode(options)
+    app_id = ENV["FIREBASE_APP_ID_ANDROID"]
+    app_id = env_value_from_fastlane_files("FIREBASE_APP_ID_ANDROID") if app_id.to_s.empty?
+    project_id = ENV["FIREBASE_PROJECT_ID"]
+    project_id = env_value_from_fastlane_files("FIREBASE_PROJECT_ID") if project_id.to_s.empty?
+    bump_pubspec_build_if_matches_firebase(app_id: app_id, project_id: project_id)
+    sh("flutter", "pub", "get")
+    sh("flutter", "build", "apk", "--#{mode}")
+  end
+
   desc "Distribute Android build to Firebase App Distribution"
   lane :firebase_android do |options|
     bootstrap_cli_env
-    artifact_path = options[:artifact_path] || Dir["build/app/outputs/bundle/release/*.aab"].max_by { |file| File.mtime(file) }
-    UI.user_error!("Android artifact not found. Run build_android first.") unless artifact_path
+    artifact_path = options[:artifact_path]
+    artifact_path ||= Dir[flutter_project_file("build", "app", "outputs", "flutter-apk", "*.apk")].max_by { |file| File.mtime(file) }
+    artifact_path ||= Dir[flutter_project_file("build", "app", "outputs", "apk", "**", "*.apk")].max_by { |file| File.mtime(file) }
+    artifact_path ||= Dir[flutter_project_file("build", "app", "outputs", "bundle", "release", "*.aab")].max_by { |file| File.mtime(file) }
+    UI.user_error!("Android artifact not found. Run build_android_apk or build_android first.") unless artifact_path
 
     app_id = options[:app_id] || ENV["FIREBASE_APP_ID_ANDROID"]
     app_id = env_value_from_fastlane_files("FIREBASE_APP_ID_ANDROID") if app_id.to_s.empty?
@@ -2017,15 +2257,15 @@ platform :android do
   desc "CI lane: fetch data, build Android, and distribute to Firebase"
   lane :ci_android do
     fetch_data
-    build_android
+    build_android_apk(build_mode: "release")
     firebase_android
   end
 
   # Use this lane for one-shot local release to Firebase App Distribution.
   desc "Local lane: build Android and upload directly to Firebase App Distribution"
-  lane :release_android_to_firebase do
+  lane :release_android_to_firebase do |options|
     fetch_data
-    build_android
+    build_android_apk(build_mode: options[:build_mode])
     firebase_android
   end
 end
@@ -2040,7 +2280,7 @@ platform :ios do
   desc "Distribute iOS build to Firebase App Distribution"
   lane :firebase_ios do |options|
     bootstrap_cli_env
-    artifact_path = options[:artifact_path] || Dir["build/ios/ipa/*.ipa"].max_by { |file| File.mtime(file) }
+    artifact_path = options[:artifact_path] || Dir[flutter_project_file("build", "ios", "ipa", "*.ipa")].max_by { |file| File.mtime(file) }
     UI.user_error!("iOS artifact not found. Run build_ios first.") unless artifact_path
 
     app_id = options[:app_id] || ENV["FIREBASE_APP_ID_IOS"]
@@ -2425,7 +2665,7 @@ FIREBASE_TOKEN=
 FIREBASE_PROJECT_ID=
 FIREBASE_APP_ID_ANDROID=
 FIREBASE_APP_ID_IOS=
-FIREBASE_TESTER_GROUPS=qa
+FIREBASE_TESTER_GROUPS=testers
 FIREBASE_RELEASE_NOTES=Automated distribution from Fastlane
 ''';
   }
