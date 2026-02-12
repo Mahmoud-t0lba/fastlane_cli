@@ -2165,9 +2165,24 @@ def resolve_android_build_mode(options)
   mode = ENV["ANDROID_BUILD_MODE"].to_s.strip.downcase if mode.empty?
 
   if mode.empty? && STDIN.tty? && ENV["CI"].to_s.empty?
-    UI.message("Choose Android build mode [release/debug] (default: release):")
+    UI.message("Choose Android build mode:")
+    UI.message("1) release")
+    UI.message("2) debug")
+    UI.message("Enter choice [1/2] (default: 1):")
     input = STDIN.gets.to_s.strip.downcase
-    mode = input unless input.empty?
+    case input
+    when "", "1", "release"
+      mode = "release"
+    when "2", "debug"
+      mode = "debug"
+    else
+      UI.important("Unknown choice '#{input}', defaulting to release.")
+      mode = "release"
+    end
+  elsif mode == "1"
+    mode = "release"
+  elsif mode == "2"
+    mode = "debug"
   end
 
   mode = "release" unless %w[release debug].include?(mode)

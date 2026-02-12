@@ -1,3 +1,10 @@
+## 0.1.11
+
+- Updated generated Android build mode prompt to numeric choices:
+  `1) release`, `2) debug`, with safe defaults.
+- Added numeric mode compatibility (`1`/`2`) when passed through
+  lane options or environment variables.
+
 ## 0.1.10
 
 - Added automatic `Firebase.initializeApp` injection in `lib/main.dart` during
