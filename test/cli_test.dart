@@ -49,6 +49,22 @@ void main() {
       );
       expect(
         File(
+          p.join(tempDir.path, 'fastlane', 'scripts', 'sync_cli_env.sh'),
+        ).existsSync(),
+        isTrue,
+      );
+      expect(
+        File(
+          p.join(tempDir.path, 'fastlane', 'scripts', 'apple_account_info.sh'),
+        ).existsSync(),
+        isTrue,
+      );
+      expect(
+        File(p.join(tempDir.path, 'fastlane', 'Pluginfile')).existsSync(),
+        isFalse,
+      );
+      expect(
+        File(
           p.join(tempDir.path, '.github', 'workflows', 'mobile_delivery.yml'),
         ).existsSync(),
         isTrue,
@@ -59,6 +75,8 @@ void main() {
       ).readAsStringSync();
       expect(fastfileContent, contains('lane :ci_android'));
       expect(fastfileContent, contains('lane :ci_ios'));
+      expect(fastfileContent, contains('lane :bootstrap_cli_env'));
+      expect(fastfileContent, contains('lane :apple_account_info'));
       expect(logs.join('\n'), contains('Setup complete'));
     });
 

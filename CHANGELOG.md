@@ -1,3 +1,15 @@
+## 0.1.8
+
+- Added generated `fastlane/scripts/sync_cli_env.sh` to auto-detect and inject
+  `GITHUB_REPOSITORY`, `GITHUB_TOKEN`, and `FIREBASE_TOKEN` from local CLI
+  sessions into `fastlane/.env`.
+- Added generated `fastlane/scripts/apple_account_info.sh` and Fastlane lane
+  `apple_account_info` to fetch Apple provider/team account data using `altool`.
+- Updated generated `Fastfile` to bootstrap CLI credentials before Firebase and
+  GitHub metadata operations, with fallback reads from `fastlane/.env`.
+- Stopped generating empty managed `fastlane/Pluginfile` files to avoid plugin
+  load warnings in Fastlane.
+
 ## 0.1.7
 
 - Updated package links to the renamed GitHub repository: `Mahmoud-t0lba/fastlane_cli`.

@@ -4,7 +4,7 @@
 
 It can:
 
-- generate Fastlane files (`Fastfile`, `Appfile`, `Pluginfile`, `.env.default`)
+- generate Fastlane files (`Fastfile`, `Appfile`, `.env.default`) and helper scripts
 - generate GitHub Actions workflow for Android/iOS
 - fetch project/git/GitHub metadata JSON
 - sync Firebase app/project data into your project files
@@ -167,12 +167,18 @@ These lanes:
 2. build release artifact
 3. upload direct to Firebase App Distribution
 
+It also generates utility lanes/scripts:
+
+- `fastlane bootstrap_cli_env`: pulls `GITHUB_REPOSITORY`, `GITHUB_TOKEN`, and `FIREBASE_TOKEN` from local CLI sessions into `fastlane/.env`
+- `fastlane apple_account_info`: shows Apple provider/team data using `altool`
+
 ## Generated/Updated Files
 
 - `fastlane/Fastfile`
 - `fastlane/Appfile`
-- `fastlane/Pluginfile`
 - `fastlane/.env.default`
+- `fastlane/scripts/sync_cli_env.sh`
+- `fastlane/scripts/apple_account_info.sh`
 - `.github/workflows/mobile_delivery.yml`
 - `fastlane/firebase_data.json`
 - `fastlane/build_data.json`

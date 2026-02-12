@@ -525,6 +525,16 @@ ${commandParser.usage}
       p.join(projectRoot, 'fastlane', 'Pluginfile'),
       overwrite,
     );
+    results['fastlane/scripts/sync_cli_env.sh'] = _writeTextFile(
+      p.join(projectRoot, 'fastlane', 'scripts', 'sync_cli_env.sh'),
+      _buildSyncCliEnvScript(),
+      overwrite,
+    );
+    results['fastlane/scripts/apple_account_info.sh'] = _writeTextFile(
+      p.join(projectRoot, 'fastlane', 'scripts', 'apple_account_info.sh'),
+      _buildAppleAccountInfoScript(),
+      overwrite,
+    );
 
     if (configureEnv) {
       results['fastlane/.env.default'] = _writeTextFile(
@@ -1893,31 +1903,26 @@ ${commandParser.usage}
   }
 
   String _ensurePluginfile(String path, bool overwrite) {
-    const managedBlock = '''# Managed by fastlane_cli
-# Add Fastlane plugin gems here if needed, for example:
-# gem "fastlane-plugin-firebase_app_distribution"
-''';
-
     final file = File(path);
-    file.parent.createSync(recursive: true);
-
     if (!file.existsSync()) {
-      file.writeAsStringSync(managedBlock);
-      return 'created';
-    }
-
-    final current = file.readAsStringSync();
-    if (current.contains('Managed by fastlane_cli')) {
-      return 'unchanged';
-    }
-
-    if (!overwrite) {
       return 'skipped';
     }
 
-    final withBreak = current.endsWith('\n') ? current : '$current\n';
-    file.writeAsStringSync('$withBreak$managedBlock');
-    return 'updated';
+    final current = file.readAsStringSync();
+    final hasPluginGem = current
+        .split('\n')
+        .map((line) => line.trimLeft())
+        .any((line) => line.startsWith('gem "') || line.startsWith("gem '"));
+
+    if (current.contains('Managed by fastlane_cli') && !hasPluginGem) {
+      if (!overwrite) {
+        return 'skipped';
+      }
+      file.deleteSync();
+      return 'removed';
+    }
+
+    return 'unchanged';
   }
 
   String _buildFastfile(String androidPackageName) {
@@ -1929,10 +1934,45 @@ ${commandParser.usage}
 
 default_platform(:android)
 
+def env_value_from_fastlane_files(key)
+  ["fastlane/.env", "fastlane/.env.default"].each do |path|
+    next unless File.exist?(path)
+
+    File.foreach(path) do |line|
+      stripped = line.strip
+      next if stripped.empty? || stripped.start_with?("#")
+
+      name, value = stripped.split("=", 2)
+      return value.to_s if name == key
+    end
+  end
+
+  ""
+end
+
+desc "Populate fastlane/.env secrets from local CLI sessions"
+lane :bootstrap_cli_env do
+  sh("bash", "fastlane/scripts/sync_cli_env.sh", "--project-root", ".", "--env-path", "fastlane/.env")
+end
+
+desc "Show Apple account providers/teams using altool"
+lane :apple_account_info do |options|
+  args = ["bash", "fastlane/scripts/apple_account_info.sh"]
+  apple_id = options[:apple_id].to_s
+  args += ["--apple-id", apple_id] unless apple_id.empty?
+  sh(*args)
+end
+
 desc "Fetch Firebase + project metadata and write JSON files for CI"
 lane :fetch_data do
+  bootstrap_cli_env
   sh("flc", "firebase-sync", "--project-root", ".", "--output-path", "fastlane/firebase_data.json", "--update-env", "--overwrite", "--optional")
-  sh("fastlane_cli", "fetch-data", "--project-root", ".", "--output-path", "fastlane/build_data.json", "--include-github")
+  fetch_args = ["fastlane_cli", "fetch-data", "--project-root", ".", "--output-path", "fastlane/build_data.json", "--include-github"]
+  github_repository = env_value_from_fastlane_files("GITHUB_REPOSITORY")
+  github_token = env_value_from_fastlane_files("GITHUB_TOKEN")
+  fetch_args += ["--github-repository", github_repository] unless github_repository.to_s.empty?
+  fetch_args += ["--github-token", github_token] unless github_token.to_s.empty?
+  sh(*fetch_args)
 end
 
 platform :android do
@@ -1944,13 +1984,18 @@ platform :android do
 
   desc "Distribute Android build to Firebase App Distribution"
   lane :firebase_android do |options|
+    bootstrap_cli_env
     artifact_path = options[:artifact_path] || Dir["build/app/outputs/bundle/release/*.aab"].max_by { |file| File.mtime(file) }
     UI.user_error!("Android artifact not found. Run build_android first.") unless artifact_path
 
     app_id = options[:app_id] || ENV["FIREBASE_APP_ID_ANDROID"]
+    app_id = env_value_from_fastlane_files("FIREBASE_APP_ID_ANDROID") if app_id.to_s.empty?
     token = ENV["FIREBASE_TOKEN"]
+    token = env_value_from_fastlane_files("FIREBASE_TOKEN") if token.to_s.empty?
     groups = options[:groups] || ENV["FIREBASE_TESTER_GROUPS"]
+    groups = env_value_from_fastlane_files("FIREBASE_TESTER_GROUPS") if groups.to_s.empty?
     release_notes = options[:release_notes] || ENV["FIREBASE_RELEASE_NOTES"]
+    release_notes = env_value_from_fastlane_files("FIREBASE_RELEASE_NOTES") if release_notes.to_s.empty?
 
     UI.user_error!("Missing FIREBASE_APP_ID_ANDROID") if app_id.to_s.empty?
     UI.user_error!("Missing FIREBASE_TOKEN") if token.to_s.empty?
@@ -1994,13 +2039,18 @@ platform :ios do
 
   desc "Distribute iOS build to Firebase App Distribution"
   lane :firebase_ios do |options|
+    bootstrap_cli_env
     artifact_path = options[:artifact_path] || Dir["build/ios/ipa/*.ipa"].max_by { |file| File.mtime(file) }
     UI.user_error!("iOS artifact not found. Run build_ios first.") unless artifact_path
 
     app_id = options[:app_id] || ENV["FIREBASE_APP_ID_IOS"]
+    app_id = env_value_from_fastlane_files("FIREBASE_APP_ID_IOS") if app_id.to_s.empty?
     token = ENV["FIREBASE_TOKEN"]
+    token = env_value_from_fastlane_files("FIREBASE_TOKEN") if token.to_s.empty?
     groups = options[:groups] || ENV["FIREBASE_TESTER_GROUPS"]
+    groups = env_value_from_fastlane_files("FIREBASE_TESTER_GROUPS") if groups.to_s.empty?
     release_notes = options[:release_notes] || ENV["FIREBASE_RELEASE_NOTES"]
+    release_notes = env_value_from_fastlane_files("FIREBASE_RELEASE_NOTES") if release_notes.to_s.empty?
 
     UI.user_error!("Missing FIREBASE_APP_ID_IOS") if app_id.to_s.empty?
     UI.user_error!("Missing FIREBASE_TOKEN") if token.to_s.empty?
@@ -2032,6 +2082,302 @@ platform :ios do
     firebase_ios
   end
 end
+''';
+  }
+
+  String _buildSyncCliEnvScript() {
+    return r'''#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="."
+env_path="fastlane/.env"
+overwrite="false"
+
+usage() {
+  cat <<'EOF'
+Usage: sync_cli_env.sh [options]
+
+Options:
+  --project-root <path>   Project root path. Default: .
+  --env-path <path>       Target env file path. Default: fastlane/.env
+  --overwrite             Overwrite existing non-empty values.
+  -h, --help              Show this help message.
+EOF
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --project-root)
+      project_root="${2:-}"
+      shift 2
+      ;;
+    --env-path)
+      env_path="${2:-}"
+      shift 2
+      ;;
+    --overwrite)
+      overwrite="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$project_root" ]]; then
+  echo "project_root cannot be empty" >&2
+  exit 1
+fi
+
+project_root="$(cd "$project_root" && pwd)"
+
+if [[ "$env_path" != /* ]]; then
+  env_path="$project_root/$env_path"
+fi
+
+mkdir -p "$(dirname "$env_path")"
+touch "$env_path"
+
+get_value_from_file() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $1 == key { value = substr($0, index($0, "=") + 1) }
+    END { print value }
+  ' "$env_path"
+}
+
+upsert_value() {
+  local key="$1"
+  local value="$2"
+  local tmp_file
+  tmp_file="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    index($0, key "=") == 1 {
+      print key "=" value
+      updated = 1
+      next
+    }
+    { print $0 }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$env_path" > "$tmp_file"
+  mv "$tmp_file" "$env_path"
+}
+
+set_if_needed() {
+  local key="$1"
+  local value="$2"
+  local source="$3"
+  local secret="${4:-false}"
+  local current
+  current="$(get_value_from_file "$key")"
+
+  if [[ -n "$current" && "$overwrite" != "true" ]]; then
+    echo "[skip] $key already set in $(basename "$env_path")"
+    return 0
+  fi
+
+  if [[ -z "$value" ]]; then
+    echo "[warn] $key could not be detected automatically"
+    return 0
+  fi
+
+  upsert_value "$key" "$value"
+  if [[ "$secret" == "true" ]]; then
+    echo "[ok] $key set from $source"
+  else
+    echo "[ok] $key=$value (from $source)"
+  fi
+}
+
+detect_github_repository() {
+  local remote_url repo
+  remote_url="$(git -C "$project_root" remote get-url origin 2>/dev/null || true)"
+  repo=""
+
+  case "$remote_url" in
+    git@github.com:*)
+      repo="${remote_url#git@github.com:}"
+      ;;
+    ssh://git@github.com/*)
+      repo="${remote_url#ssh://git@github.com/}"
+      ;;
+    https://github.com/*)
+      repo="${remote_url#https://github.com/}"
+      ;;
+    http://github.com/*)
+      repo="${remote_url#http://github.com/}"
+      ;;
+  esac
+
+  repo="${repo%.git}"
+  repo="${repo#/}"
+  printf '%s' "$repo"
+}
+
+detect_github_token() {
+  local token credential_output
+
+  token="${GITHUB_TOKEN:-}"
+  if [[ -n "$token" ]]; then
+    printf '%s' "$token"
+    return 0
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    token="$(gh auth token 2>/dev/null || true)"
+    token="${token//$'\r'/}"
+    token="${token//$'\n'/}"
+    if [[ -n "$token" ]]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  fi
+
+  credential_output="$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null || true)"
+  token="$(printf '%s\n' "$credential_output" | awk -F= '$1 == "password" { print $2; exit }')"
+  printf '%s' "$token"
+}
+
+detect_firebase_token() {
+  local token config_path
+  token="${FIREBASE_TOKEN:-}"
+  if [[ -n "$token" ]]; then
+    printf '%s' "$token"
+    return 0
+  fi
+
+  config_path="${XDG_CONFIG_HOME:-$HOME/.config}/configstore/firebase-tools.json"
+  if [[ ! -f "$config_path" ]]; then
+    return 0
+  fi
+
+  ruby -rjson -e '
+data = JSON.parse(File.read(ARGV[0]))
+token = data.dig("tokens", "refresh_token").to_s
+token = data.dig("tokens", "access_token").to_s if token.empty?
+print token
+' "$config_path" 2>/dev/null || true
+}
+
+github_repository="$(detect_github_repository)"
+github_token="$(detect_github_token)"
+firebase_token="$(detect_firebase_token)"
+
+set_if_needed "GITHUB_REPOSITORY" "$github_repository" "git remote"
+set_if_needed "GITHUB_TOKEN" "$github_token" "GitHub CLI or git credential helper" "true"
+set_if_needed "FIREBASE_TOKEN" "$firebase_token" "firebase CLI local session" "true"
+
+if [[ -z "$(get_value_from_file "FASTLANE_APPLE_ID")" ]]; then
+  echo "[info] FASTLANE_APPLE_ID is still empty. Set it manually, then run:"
+  echo "       fastlane apple_account_info apple_id:you@example.com"
+fi
+
+echo "[done] CLI sync complete: $env_path"
+''';
+  }
+
+  String _buildAppleAccountInfoScript() {
+    return r'''#!/usr/bin/env bash
+set -euo pipefail
+
+apple_id="${FASTLANE_APPLE_ID:-}"
+api_key_id="${APP_STORE_CONNECT_API_KEY_ID:-}"
+api_issuer_id="${APP_STORE_CONNECT_API_ISSUER_ID:-}"
+keychain_item="${FASTLANE_APPLE_PASSWORD_ITEM:-}"
+password="${FASTLANE_APPLE_APP_SPECIFIC_PASSWORD:-${FASTLANE_PASSWORD:-}}"
+
+usage() {
+  cat <<'EOF'
+Usage: apple_account_info.sh [options]
+
+Options:
+  --apple-id <email>            Apple ID email.
+  --api-key-id <id>             App Store Connect API key id.
+  --api-issuer-id <id>          App Store Connect API issuer id.
+  --password <value>            Apple account password/app-specific password.
+  --password-keychain-item <n>  macOS keychain item name used by altool.
+  -h, --help                    Show this help message.
+EOF
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --apple-id)
+      apple_id="${2:-}"
+      shift 2
+      ;;
+    --api-key-id)
+      api_key_id="${2:-}"
+      shift 2
+      ;;
+    --api-issuer-id)
+      api_issuer_id="${2:-}"
+      shift 2
+      ;;
+    --password)
+      password="${2:-}"
+      shift 2
+      ;;
+    --password-keychain-item)
+      keychain_item="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -n "$api_key_id" || -n "$api_issuer_id" ]]; then
+  if [[ -z "$api_key_id" || -z "$api_issuer_id" ]]; then
+    echo "Both --api-key-id and --api-issuer-id are required for API key auth." >&2
+    exit 1
+  fi
+  exec xcrun altool --list-providers --api-key "$api_key_id" --api-issuer "$api_issuer_id" --output-format json
+fi
+
+if [[ -z "$apple_id" ]]; then
+  echo "Missing Apple ID. Set FASTLANE_APPLE_ID or pass --apple-id <email>." >&2
+  exit 1
+fi
+
+if [[ -n "$keychain_item" ]]; then
+  exec xcrun altool --list-providers -u "$apple_id" -p "@keychain:$keychain_item" --output-format json
+fi
+
+if [[ -z "$password" ]]; then
+  cat >&2 <<'EOF'
+Missing Apple auth password.
+Set one of:
+  FASTLANE_APPLE_APP_SPECIFIC_PASSWORD
+  FASTLANE_PASSWORD
+Or pass:
+  --password <value>
+or:
+  --password-keychain-item <name>
+EOF
+  exit 1
+fi
+
+exec xcrun altool --list-providers -u "$apple_id" -p "$password" --output-format json
 ''';
   }
 
