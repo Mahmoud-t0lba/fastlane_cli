@@ -45,7 +45,21 @@ dart run fastlane_configurator:fastlane_configurator --help
 
 ## Commands
 
-### 1) Setup project delivery files
+### 1) One-shot init (recommended)
+
+Use this after install to prepare everything automatically:
+
+```bash
+flc init --project-root . --firebase-project your-firebase-project-id --overwrite
+```
+
+This single command does:
+
+- `setup` (Fastlane + workflow files)
+- `firebase-sync` (fetch from Firebase CLI and auto-inject values)
+- `fetch-data` (project metadata JSON for CI)
+
+### 2) Setup project delivery files only
 
 ```bash
 fastlane_configurator setup --project-root . --overwrite
@@ -70,7 +84,32 @@ Useful setup flags:
 - `--ios-bundle-id com.example.app` manual override
 - `--android-package-name com.example.app` manual override
 
-### 2) Fetch metadata for CI
+### 3) Firebase sync (auto-fetch + auto-inject)
+
+```bash
+flc firebase-sync --project-root . --firebase-project your-firebase-project-id --overwrite
+```
+
+This creates:
+
+- `fastlane/firebase_data.json`
+
+And updates automatically:
+
+- `fastlane/.env.default`
+  - `FIREBASE_PROJECT_ID`
+  - `FIREBASE_APP_ID_ANDROID`
+  - `FIREBASE_APP_ID_IOS`
+  - `FASTLANE_ANDROID_PACKAGE_NAME`
+  - `FASTLANE_APP_IDENTIFIER`
+
+If Firebase CLI is not configured yet and you want to skip hard failure:
+
+```bash
+flc firebase-sync --project-root . --optional
+```
+
+### 4) Fetch metadata for CI
 
 ```bash
 fastlane_configurator fetch-data --project-root . --output-path fastlane/build_data.json --include-github
@@ -90,6 +129,7 @@ Use `--no-include-github` to skip GitHub API calls.
 ## Required environment variables for generated lanes/workflow
 
 - `FIREBASE_TOKEN`
+- `FIREBASE_PROJECT_ID`
 - `FIREBASE_APP_ID_ANDROID`
 - `FIREBASE_APP_ID_IOS`
 - `FIREBASE_TESTER_GROUPS`

@@ -109,6 +109,110 @@ void main() {
       expect(payload.containsKey('github'), isFalse);
       expect(logs.join('\n'), contains('Metadata written'));
     });
+
+    test(
+        'firebase-sync fetches firebase metadata and updates env automatically',
+        () async {
+      final tempDir = await Directory.systemTemp.createTemp('fl_config_fb_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      cli = FastlaneConfiguratorCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunner(),
+      );
+
+      final code = await cli.run(<String>[
+        'firebase-sync',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'demo-project',
+        '--overwrite',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+
+      final firebaseJson = File(
+        p.join(tempDir.path, 'fastlane', 'firebase_data.json'),
+      );
+      final envFile = File(p.join(tempDir.path, 'fastlane', '.env.default'));
+
+      expect(firebaseJson.existsSync(), isTrue);
+      expect(envFile.existsSync(), isTrue);
+
+      final payload =
+          jsonDecode(firebaseJson.readAsStringSync()) as Map<String, dynamic>;
+      expect(payload['firebase_project_id'], 'demo-project');
+      expect(payload['android_app_id'], '1:123:android:abc');
+      expect(payload['ios_app_id'], '1:123:ios:def');
+
+      final envContent = envFile.readAsStringSync();
+      expect(envContent, contains('FIREBASE_PROJECT_ID=demo-project'));
+      expect(envContent, contains('FIREBASE_APP_ID_ANDROID=1:123:android:abc'));
+      expect(envContent, contains('FIREBASE_APP_ID_IOS=1:123:ios:def'));
+      expect(envContent,
+          contains('FASTLANE_ANDROID_PACKAGE_NAME=com.example.demo'));
+      expect(envContent, contains('FASTLANE_APP_IDENTIFIER=com.example.demo'));
+    });
+
+    test('init runs setup + firebase-sync + fetch-data in one command',
+        () async {
+      final tempDir = await Directory.systemTemp.createTemp('fl_config_init_');
+      addTearDown(() async => tempDir.delete(recursive: true));
+
+      _writeFile(
+        p.join(tempDir.path, 'pubspec.yaml'),
+        'name: demo_app\nversion: 2.1.0+13\n',
+      );
+      _writeFile(
+        p.join(tempDir.path, 'ios', 'Runner.xcodeproj', 'project.pbxproj'),
+        'PRODUCT_BUNDLE_IDENTIFIER = com.example.demo;\n',
+      );
+      _writeFile(
+        p.join(tempDir.path, 'android', 'app', 'build.gradle.kts'),
+        'android { defaultConfig { applicationId = "com.example.demo" } }\n',
+      );
+
+      cli = FastlaneConfiguratorCli(
+        out: logs.add,
+        err: errors.add,
+        processRunner: _mockProcessRunner(),
+      );
+
+      final code = await cli.run(<String>[
+        'init',
+        '--project-root',
+        tempDir.path,
+        '--firebase-project',
+        'demo-project',
+        '--overwrite',
+        '--no-include-github',
+      ]);
+
+      expect(code, 0);
+      expect(errors, isEmpty);
+
+      expect(
+        File(p.join(tempDir.path, 'fastlane', 'Fastfile')).existsSync(),
+        isTrue,
+      );
+      expect(
+        File(p.join(tempDir.path, 'fastlane', 'firebase_data.json'))
+            .existsSync(),
+        isTrue,
+      );
+      expect(
+        File(p.join(tempDir.path, 'fastlane', 'build_data.json')).existsSync(),
+        isTrue,
+      );
+
+      final envContent = File(p.join(tempDir.path, 'fastlane', '.env.default'))
+          .readAsStringSync();
+      expect(envContent, contains('FIREBASE_PROJECT_ID=demo-project'));
+      expect(logs.join('\n'), contains('Init complete'));
+    });
   });
 }
 
@@ -116,4 +220,72 @@ void _writeFile(String path, String content) {
   final file = File(path);
   file.parent.createSync(recursive: true);
   file.writeAsStringSync(content);
+}
+
+ProcessRunner _mockProcessRunner() {
+  return (
+    String executable,
+    List<String> arguments, {
+    String? workingDirectory,
+  }) async {
+    if (executable == 'firebase') {
+      if (arguments.isNotEmpty && arguments.first == 'apps:list') {
+        return ProcessResult(
+            1,
+            0,
+            jsonEncode(<String, Object?>{
+              'status': 'success',
+              'result': <Map<String, String>>[
+                <String, String>{
+                  'appId': '1:123:android:abc',
+                  'platform': 'ANDROID',
+                  'displayName': 'Android App',
+                  'packageName': 'com.example.demo',
+                },
+                <String, String>{
+                  'appId': '1:123:ios:def',
+                  'platform': 'IOS',
+                  'displayName': 'iOS App',
+                  'bundleId': 'com.example.demo',
+                },
+              ],
+            }),
+            '');
+      }
+
+      if (arguments.isNotEmpty && arguments.first == 'projects:list') {
+        return ProcessResult(
+            1,
+            0,
+            jsonEncode(<String, Object?>{
+              'status': 'success',
+              'result': <Map<String, String>>[
+                <String, String>{
+                  'projectId': 'demo-project',
+                  'projectNumber': '1234567890',
+                },
+              ],
+            }),
+            '');
+      }
+
+      if (arguments.length >= 2 &&
+          arguments.first == 'use' &&
+          arguments[1] == '--json') {
+        return ProcessResult(
+          1,
+          0,
+          jsonEncode(
+              <String, String>{'status': 'success', 'result': 'demo-project'}),
+          '',
+        );
+      }
+    }
+
+    if (executable == 'git') {
+      return ProcessResult(1, 1, '', 'not a git repository');
+    }
+
+    return ProcessResult(1, 1, '', 'command not mocked');
+  };
 }

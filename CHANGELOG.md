@@ -1,3 +1,12 @@
+## 0.1.2
+
+- Added `firebase-sync` command to fetch Firebase app/project data via Firebase CLI.
+- Added automatic env injection into `fastlane/.env.default` from fetched Firebase data.
+- Added `init` one-shot command (`setup` + `firebase-sync` + `fetch-data`).
+- Updated generated `Fastfile` `fetch_data` lane to run Firebase sync automatically.
+- Added Dartdoc comments for public API symbols.
+- Added `example/main.dart` for pub.dev example scoring.
+
 ## 0.1.1
 
 - Improved executable usage with a short alias: `flc`.

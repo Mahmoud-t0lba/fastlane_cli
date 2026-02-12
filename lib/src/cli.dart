@@ -6,20 +6,42 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:yaml/yaml.dart';
 
+/// Writes a single line message to CLI output.
 typedef LineWriter = void Function(String message);
 
+/// Abstraction for spawning shell commands.
+///
+/// This allows tests to mock external processes (like `firebase` and `git`).
+typedef ProcessRunner = Future<ProcessResult> Function(
+  String executable,
+  List<String> arguments, {
+  String? workingDirectory,
+});
+
+/// CLI entrypoint for generating and syncing Fastlane/Firebase configuration.
 class FastlaneConfiguratorCli {
+  /// Creates a new CLI runner.
+  ///
+  /// Optional dependencies can be injected for custom output and testing.
   FastlaneConfiguratorCli({
     LineWriter? out,
     LineWriter? err,
     http.Client? httpClient,
+    ProcessRunner? processRunner,
   })  : _out = out ?? ((message) => stdout.writeln(message)),
         _err = err ?? ((message) => stderr.writeln(message)),
-        _httpClient = httpClient ?? http.Client();
+        _httpClient = httpClient ?? http.Client(),
+        _processRunner = processRunner ??
+            ((executable, arguments, {workingDirectory}) => Process.run(
+                  executable,
+                  arguments,
+                  workingDirectory: workingDirectory,
+                ));
 
   final LineWriter _out;
   final LineWriter _err;
   final http.Client _httpClient;
+  final ProcessRunner _processRunner;
 
   ArgParser _buildParser() {
     final parser = ArgParser()
@@ -30,9 +52,107 @@ class FastlaneConfiguratorCli {
         help: 'Show this help message.',
       );
 
+    parser.addCommand('init', _initParser());
     parser.addCommand('setup', _setupParser());
+    parser.addCommand('firebase-sync', _firebaseSyncParser());
     parser.addCommand('fetch-data', _fetchDataParser());
     return parser;
+  }
+
+  ArgParser _initParser() {
+    return ArgParser()
+      ..addFlag(
+        'help',
+        abbr: 'h',
+        negatable: false,
+        help: 'Show init command help.',
+      )
+      ..addOption(
+        'project-root',
+        help: 'Root path of target Flutter project.',
+        defaultsTo: '.',
+      )
+      ..addFlag(
+        'overwrite',
+        help: 'Overwrite existing generated files.',
+        defaultsTo: false,
+      )
+      ..addFlag(
+        'ci',
+        help: 'Generate .github/workflows workflow.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addFlag(
+        'env',
+        help: 'Generate fastlane/.env.default file.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addOption(
+        'workflow-filename',
+        help: 'Workflow filename under .github/workflows.',
+        defaultsTo: 'mobile_delivery.yml',
+      )
+      ..addOption(
+        'ci-branch',
+        help: 'Branch that triggers workflow push.',
+        defaultsTo: 'main',
+      )
+      ..addOption(
+        'ios-bundle-id',
+        help: 'Manual iOS bundle id override.',
+      )
+      ..addOption(
+        'android-package-name',
+        help: 'Manual Android package name override.',
+      )
+      ..addOption(
+        'apple-id',
+        help: 'Apple ID email for App Store Connect operations.',
+      )
+      ..addOption(
+        'team-id',
+        help: 'Apple Developer Team ID.',
+      )
+      ..addOption(
+        'itc-team-id',
+        help: 'App Store Connect Team ID.',
+      )
+      ..addOption(
+        'firebase-project',
+        help:
+            'Firebase project id. If omitted, CLI tries active firebase target.',
+      )
+      ..addOption(
+        'firebase-output-path',
+        help: 'Firebase metadata JSON output path.',
+        defaultsTo: 'fastlane/firebase_data.json',
+      )
+      ..addFlag(
+        'firebase-optional',
+        help: 'Skip firebase sync errors if Firebase CLI is unavailable.',
+        defaultsTo: false,
+      )
+      ..addOption(
+        'output-path',
+        help: 'General metadata JSON output path.',
+        defaultsTo: 'fastlane/build_data.json',
+      )
+      ..addFlag(
+        'include-github',
+        help: 'Include latest release and workflow run data from GitHub API.',
+        defaultsTo: false,
+        negatable: true,
+      )
+      ..addOption(
+        'github-repository',
+        help: 'GitHub repository in owner/repo format.',
+      )
+      ..addOption(
+        'github-token',
+        help: 'GitHub token for authenticated API requests.',
+      );
   }
 
   ArgParser _setupParser() {
@@ -131,6 +251,55 @@ class FastlaneConfiguratorCli {
       );
   }
 
+  ArgParser _firebaseSyncParser() {
+    return ArgParser()
+      ..addFlag(
+        'help',
+        abbr: 'h',
+        negatable: false,
+        help: 'Show firebase-sync command help.',
+      )
+      ..addOption(
+        'project-root',
+        help: 'Root path of target Flutter project.',
+        defaultsTo: '.',
+      )
+      ..addOption(
+        'firebase-project',
+        help:
+            'Firebase project id. If omitted, CLI tries active firebase target.',
+      )
+      ..addOption(
+        'output-path',
+        help: 'Firebase metadata JSON output path.',
+        defaultsTo: 'fastlane/firebase_data.json',
+      )
+      ..addOption(
+        'env-path',
+        help: 'Environment file path to update with fetched Firebase values.',
+        defaultsTo: 'fastlane/.env.default',
+      )
+      ..addFlag(
+        'update-env',
+        help: 'Update env file automatically with fetched values.',
+        defaultsTo: true,
+        negatable: true,
+      )
+      ..addFlag(
+        'overwrite',
+        help: 'Overwrite existing env values when update-env is enabled.',
+        defaultsTo: true,
+      )
+      ..addFlag(
+        'optional',
+        help: 'Skip errors if Firebase CLI is unavailable or not configured.',
+        defaultsTo: false,
+      );
+  }
+
+  /// Runs the CLI command and returns a process-style exit code.
+  ///
+  /// Returns `0` on success, `64` for usage errors, and `1` for runtime errors.
   Future<int> run(List<String> args) async {
     final parser = _buildParser();
     try {
@@ -155,8 +324,14 @@ class FastlaneConfiguratorCli {
       }
 
       switch (command.name) {
+        case 'init':
+          await _runInit(command);
+          return 0;
         case 'setup':
           await _runSetup(command);
+          return 0;
+        case 'firebase-sync':
+          await _runFirebaseSync(command);
           return 0;
         case 'fetch-data':
           await _runFetchData(command);
@@ -184,8 +359,10 @@ Usage:
   fastlane_configurator <command> [options]
 
 Commands:
-  setup       Generate Fastlane, env, and GitHub Actions configuration files.
-  fetch-data  Collect project/git/GitHub metadata into JSON.
+  init          One-shot setup + Firebase sync + metadata fetch.
+  setup         Generate Fastlane, env, and GitHub Actions configuration files.
+  firebase-sync Fetch Firebase apps/project data and inject it into project files.
+  fetch-data    Collect project/git/GitHub metadata into JSON.
 
 Global options:
 ${parser.usage}
@@ -202,38 +379,99 @@ ${commandParser.usage}
 ''';
   }
 
-  Future<void> _runSetup(ArgResults command) async {
-    final projectRoot = p.normalize(
-      p.absolute(_stringValue(command['project-root']) ?? '.'),
-    );
+  Future<void> _runInit(ArgResults command) async {
+    final projectRoot =
+        p.normalize(p.absolute(_stringValue(command['project-root']) ?? '.'));
     final overwrite = command['overwrite'] as bool;
-    final configureCi = command['ci'] as bool;
-    final configureEnv = command['env'] as bool;
-    final workflowFilename =
-        _stringValue(command['workflow-filename']) ?? 'mobile_delivery.yml';
-    final ciBranch = _stringValue(command['ci-branch']) ?? 'main';
 
-    final iosBundleId = _stringValue(command['ios-bundle-id']) ??
+    await _runSetupInternal(
+      projectRoot: projectRoot,
+      overwrite: overwrite,
+      configureCi: command['ci'] as bool,
+      configureEnv: command['env'] as bool,
+      workflowFilename:
+          _stringValue(command['workflow-filename']) ?? 'mobile_delivery.yml',
+      ciBranch: _stringValue(command['ci-branch']) ?? 'main',
+      iosBundleIdOverride: _stringValue(command['ios-bundle-id']),
+      androidPackageNameOverride: _stringValue(command['android-package-name']),
+      appleId: _stringValue(command['apple-id']),
+      teamId: _stringValue(command['team-id']),
+      itcTeamId: _stringValue(command['itc-team-id']),
+    );
+
+    await _runFirebaseSyncInternal(
+      projectRoot: projectRoot,
+      firebaseProject: _stringValue(command['firebase-project']),
+      outputPath: _stringValue(command['firebase-output-path']) ??
+          'fastlane/firebase_data.json',
+      envPath: p.join(projectRoot, 'fastlane', '.env.default'),
+      updateEnv: true,
+      overwrite: true,
+      optional: command['firebase-optional'] as bool,
+    );
+
+    await _runFetchDataInternal(
+      projectRoot: projectRoot,
+      outputPath:
+          _stringValue(command['output-path']) ?? 'fastlane/build_data.json',
+      includeGithub: command['include-github'] as bool,
+      repository: _stringValue(command['github-repository']) ??
+          _stringValue(Platform.environment['GITHUB_REPOSITORY']),
+      token: _stringValue(command['github-token']) ??
+          _stringValue(Platform.environment['GITHUB_TOKEN']),
+    );
+
+    _out('Init complete for: $projectRoot');
+  }
+
+  Future<void> _runSetup(ArgResults command) async {
+    final projectRoot =
+        p.normalize(p.absolute(_stringValue(command['project-root']) ?? '.'));
+    await _runSetupInternal(
+      projectRoot: projectRoot,
+      overwrite: command['overwrite'] as bool,
+      configureCi: command['ci'] as bool,
+      configureEnv: command['env'] as bool,
+      workflowFilename:
+          _stringValue(command['workflow-filename']) ?? 'mobile_delivery.yml',
+      ciBranch: _stringValue(command['ci-branch']) ?? 'main',
+      iosBundleIdOverride: _stringValue(command['ios-bundle-id']),
+      androidPackageNameOverride: _stringValue(command['android-package-name']),
+      appleId: _stringValue(command['apple-id']),
+      teamId: _stringValue(command['team-id']),
+      itcTeamId: _stringValue(command['itc-team-id']),
+    );
+  }
+
+  Future<void> _runSetupInternal({
+    required String projectRoot,
+    required bool overwrite,
+    required bool configureCi,
+    required bool configureEnv,
+    required String workflowFilename,
+    required String ciBranch,
+    required String? iosBundleIdOverride,
+    required String? androidPackageNameOverride,
+    required String? appleId,
+    required String? teamId,
+    required String? itcTeamId,
+  }) async {
+    final iosBundleId = iosBundleIdOverride ??
         _inferIosBundleId(projectRoot) ??
         'com.example.app';
-    final androidPackageName = _stringValue(command['android-package-name']) ??
+    final androidPackageName = androidPackageNameOverride ??
         _inferAndroidPackageName(projectRoot) ??
         'com.example.app';
-    final appleId = _stringValue(command['apple-id']);
-    final teamId = _stringValue(command['team-id']);
-    final itcTeamId = _stringValue(command['itc-team-id']);
 
     final fastlaneDir = Directory(p.join(projectRoot, 'fastlane'));
     fastlaneDir.createSync(recursive: true);
 
     final results = <String, String>{};
-
     results['fastlane/Fastfile'] = _writeTextFile(
       p.join(projectRoot, 'fastlane', 'Fastfile'),
       _buildFastfile(androidPackageName),
       overwrite,
     );
-
     results['fastlane/Appfile'] = _writeTextFile(
       p.join(projectRoot, 'fastlane', 'Appfile'),
       _buildAppfile(
@@ -244,7 +482,6 @@ ${commandParser.usage}
       ),
       overwrite,
     );
-
     results['fastlane/Pluginfile'] = _ensurePluginfile(
       p.join(projectRoot, 'fastlane', 'Pluginfile'),
       overwrite,
@@ -265,12 +502,8 @@ ${commandParser.usage}
     }
 
     if (configureCi) {
-      final workflowPath = p.join(
-        projectRoot,
-        '.github',
-        'workflows',
-        workflowFilename,
-      );
+      final workflowPath =
+          p.join(projectRoot, '.github', 'workflows', workflowFilename);
       results['.github/workflows/$workflowFilename'] = _writeTextFile(
         workflowPath,
         _buildGithubWorkflow(ciBranch),
@@ -286,19 +519,149 @@ ${commandParser.usage}
     }
   }
 
-  Future<void> _runFetchData(ArgResults command) async {
-    final projectRoot = p.normalize(
-      p.absolute(_stringValue(command['project-root']) ?? '.'),
+  Future<void> _runFirebaseSync(ArgResults command) async {
+    final projectRoot =
+        p.normalize(p.absolute(_stringValue(command['project-root']) ?? '.'));
+    await _runFirebaseSyncInternal(
+      projectRoot: projectRoot,
+      firebaseProject: _stringValue(command['firebase-project']),
+      outputPath:
+          _stringValue(command['output-path']) ?? 'fastlane/firebase_data.json',
+      envPath: _resolveAbsolutePath(
+        projectRoot,
+        _stringValue(command['env-path']) ?? 'fastlane/.env.default',
+      ),
+      updateEnv: command['update-env'] as bool,
+      overwrite: command['overwrite'] as bool,
+      optional: command['optional'] as bool,
     );
-    final outputPath =
-        _stringValue(command['output-path']) ?? 'fastlane/build_data.json';
-    final includeGithub = command['include-github'] as bool;
+  }
 
-    final repository = _stringValue(command['github-repository']) ??
-        _stringValue(Platform.environment['GITHUB_REPOSITORY']);
-    final token = _stringValue(command['github-token']) ??
-        _stringValue(Platform.environment['GITHUB_TOKEN']);
+  Future<void> _runFirebaseSyncInternal({
+    required String projectRoot,
+    required String? firebaseProject,
+    required String outputPath,
+    required String envPath,
+    required bool updateEnv,
+    required bool overwrite,
+    required bool optional,
+  }) async {
+    final resolvedProject =
+        await _resolveFirebaseProject(projectRoot, firebaseProject);
+    if (resolvedProject == null) {
+      if (optional) {
+        _out('Firebase sync skipped: no Firebase project id resolved.');
+        return;
+      }
+      throw Exception(
+        'Firebase project not found. Pass --firebase-project or set FIREBASE_PROJECT_ID.',
+      );
+    }
 
+    final appsResponse = await _runCommand(
+      'firebase',
+      <String>['apps:list', '--project', resolvedProject, '--json'],
+      projectRoot,
+      optional: optional,
+    );
+    if (appsResponse == null) {
+      _out('Firebase sync skipped: Firebase CLI is unavailable.');
+      return;
+    }
+    if (appsResponse.exitCode != 0) {
+      if (optional) {
+        _out('Firebase sync skipped: apps:list failed.');
+        return;
+      }
+      throw Exception(
+        'firebase apps:list failed: ${appsResponse.stderr.toString().trim()}',
+      );
+    }
+
+    final appsDecoded = _decodeJsonOrEmpty(appsResponse.stdout.toString());
+    final apps = _extractFirebaseApps(appsDecoded);
+    final androidApp = _findFirebaseApp(apps, 'ANDROID');
+    final iosApp = _findFirebaseApp(apps, 'IOS');
+
+    String? projectNumber;
+    final projectsResponse = await _runCommand(
+      'firebase',
+      <String>['projects:list', '--json'],
+      projectRoot,
+      optional: true,
+    );
+    if (projectsResponse != null && projectsResponse.exitCode == 0) {
+      final projectsDecoded =
+          _decodeJsonOrEmpty(projectsResponse.stdout.toString());
+      projectNumber =
+          _extractFirebaseProjectNumber(projectsDecoded, resolvedProject);
+    }
+
+    final payload = <String, Object?>{
+      'generated_at_utc': DateTime.now().toUtc().toIso8601String(),
+      'firebase_project_id': resolvedProject,
+      'firebase_project_number': projectNumber,
+      'android_app_id': _stringValue(androidApp?['appId']),
+      'ios_app_id': _stringValue(iosApp?['appId']),
+      'apps': apps
+          .map((app) => <String, Object?>{
+                'app_id': _stringValue(app['appId']),
+                'platform': _stringValue(app['platform']),
+                'display_name': _stringValue(app['displayName']),
+                'package_name': _stringValue(app['packageName']),
+                'bundle_id': _stringValue(app['bundleId']),
+              })
+          .toList(),
+    };
+
+    final absoluteOutputPath = _resolveAbsolutePath(projectRoot, outputPath);
+    final outputFile = File(absoluteOutputPath);
+    outputFile.parent.createSync(recursive: true);
+    const encoder = JsonEncoder.withIndent('  ');
+    outputFile.writeAsStringSync('${encoder.convert(payload)}\n');
+    _out('Firebase data written to $absoluteOutputPath');
+
+    if (updateEnv) {
+      final envUpdates = <String, String?>{
+        'FIREBASE_PROJECT_ID': resolvedProject,
+        'FIREBASE_APP_ID_ANDROID': _stringValue(androidApp?['appId']),
+        'FIREBASE_APP_ID_IOS': _stringValue(iosApp?['appId']),
+        'FASTLANE_ANDROID_PACKAGE_NAME':
+            _stringValue(androidApp?['packageName']),
+        'FASTLANE_APP_IDENTIFIER': _stringValue(iosApp?['bundleId']),
+      };
+
+      final envStatus = _upsertEnvFile(
+        path: envPath,
+        values: envUpdates,
+        overwrite: overwrite,
+      );
+      _out('- ${p.relative(envPath, from: projectRoot)}: $envStatus');
+    }
+  }
+
+  Future<void> _runFetchData(ArgResults command) async {
+    final projectRoot =
+        p.normalize(p.absolute(_stringValue(command['project-root']) ?? '.'));
+    await _runFetchDataInternal(
+      projectRoot: projectRoot,
+      outputPath:
+          _stringValue(command['output-path']) ?? 'fastlane/build_data.json',
+      includeGithub: command['include-github'] as bool,
+      repository: _stringValue(command['github-repository']) ??
+          _stringValue(Platform.environment['GITHUB_REPOSITORY']),
+      token: _stringValue(command['github-token']) ??
+          _stringValue(Platform.environment['GITHUB_TOKEN']),
+    );
+  }
+
+  Future<void> _runFetchDataInternal({
+    required String projectRoot,
+    required String outputPath,
+    required bool includeGithub,
+    required String? repository,
+    required String? token,
+  }) async {
     final appData = _readPubspecAppData(projectRoot);
 
     final payload = <String, Object?>{
@@ -314,13 +677,14 @@ ${commandParser.usage}
         'android_package_name': _inferAndroidPackageName(projectRoot),
       },
       'git': <String, Object?>{
-        'branch': await _gitOutput(projectRoot, [
+        'branch': await _gitOutput(projectRoot, const <String>[
           'rev-parse',
           '--abbrev-ref',
           'HEAD',
         ]),
-        'sha': await _gitOutput(projectRoot, ['rev-parse', 'HEAD']),
-        'latest_tag': await _gitOutput(projectRoot, [
+        'sha':
+            await _gitOutput(projectRoot, const <String>['rev-parse', 'HEAD']),
+        'latest_tag': await _gitOutput(projectRoot, const <String>[
           'describe',
           '--tags',
           '--abbrev=0',
@@ -332,9 +696,7 @@ ${commandParser.usage}
       payload['github'] = await _buildGithubPayload(repository, token);
     }
 
-    final absoluteOutputPath =
-        p.isAbsolute(outputPath) ? outputPath : p.join(projectRoot, outputPath);
-
+    final absoluteOutputPath = _resolveAbsolutePath(projectRoot, outputPath);
     final outputFile = File(absoluteOutputPath);
     outputFile.parent.createSync(recursive: true);
     const encoder = JsonEncoder.withIndent('  ');
@@ -389,6 +751,232 @@ ${commandParser.usage}
       'version_name': versionName,
       'version_code': versionCode,
     };
+  }
+
+  String _resolveAbsolutePath(String projectRoot, String path) {
+    return p.isAbsolute(path) ? path : p.join(projectRoot, path);
+  }
+
+  Future<ProcessResult?> _runCommand(
+    String executable,
+    List<String> args,
+    String workingDirectory, {
+    bool optional = false,
+  }) async {
+    try {
+      return await _processRunner(
+        executable,
+        args,
+        workingDirectory: workingDirectory,
+      );
+    } on ProcessException catch (error) {
+      if (optional) {
+        _out(
+          'Skipping command "$executable ${args.join(' ')}": ${error.message}',
+        );
+        return null;
+      }
+      rethrow;
+    }
+  }
+
+  Future<String?> _resolveFirebaseProject(
+    String projectRoot,
+    String? firebaseProject,
+  ) async {
+    final explicit = _stringValue(firebaseProject);
+    if (explicit != null) {
+      return explicit;
+    }
+
+    final envProject =
+        _stringValue(Platform.environment['FIREBASE_PROJECT_ID']) ??
+            _stringValue(Platform.environment['GCLOUD_PROJECT']);
+    if (envProject != null) {
+      return envProject;
+    }
+
+    final useCommand = await _runCommand(
+      'firebase',
+      const <String>['use', '--json'],
+      projectRoot,
+      optional: true,
+    );
+    if (useCommand == null || useCommand.exitCode != 0) {
+      return null;
+    }
+
+    final decoded = _decodeJsonOrEmpty(useCommand.stdout.toString());
+    if (decoded is Map<String, dynamic>) {
+      final result = decoded['result'];
+      if (result is String && result.trim().isNotEmpty) {
+        return result.trim();
+      }
+      if (result is Map<String, dynamic>) {
+        final project = _stringValue(result['projectId']);
+        if (project != null) {
+          return project;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  dynamic _decodeJsonOrEmpty(String raw) {
+    final normalized = raw.trim();
+    if (normalized.isEmpty) {
+      return <String, dynamic>{};
+    }
+
+    try {
+      return jsonDecode(normalized);
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  List<Map<String, dynamic>> _extractFirebaseApps(dynamic decoded) {
+    List<Map<String, dynamic>> toList(dynamic value) {
+      if (value is List) {
+        return value
+            .whereType<Map>()
+            .map((entry) => Map<String, dynamic>.from(entry))
+            .toList();
+      }
+      return <Map<String, dynamic>>[];
+    }
+
+    if (decoded is List) {
+      return toList(decoded);
+    }
+    if (decoded is Map<String, dynamic>) {
+      if (decoded['result'] is List) {
+        return toList(decoded['result']);
+      }
+      if (decoded['result'] is Map<String, dynamic>) {
+        final resultMap = decoded['result'] as Map<String, dynamic>;
+        if (resultMap['apps'] is List) {
+          return toList(resultMap['apps']);
+        }
+      }
+      if (decoded['apps'] is List) {
+        return toList(decoded['apps']);
+      }
+    }
+    return <Map<String, dynamic>>[];
+  }
+
+  String? _extractFirebaseProjectNumber(dynamic decoded, String projectId) {
+    List<Map<String, dynamic>> toProjects(dynamic value) {
+      if (value is List) {
+        return value
+            .whereType<Map>()
+            .map((entry) => Map<String, dynamic>.from(entry))
+            .toList();
+      }
+      return <Map<String, dynamic>>[];
+    }
+
+    final candidates = <Map<String, dynamic>>[];
+    if (decoded is Map<String, dynamic>) {
+      candidates.addAll(toProjects(decoded['result']));
+      candidates.addAll(toProjects(decoded['projects']));
+    } else if (decoded is List) {
+      candidates.addAll(toProjects(decoded));
+    }
+
+    for (final project in candidates) {
+      final id = _stringValue(project['projectId']) ??
+          _stringValue(project['project_id']);
+      if (id == projectId) {
+        return _stringValue(project['projectNumber']) ??
+            _stringValue(project['project_number']);
+      }
+    }
+
+    return null;
+  }
+
+  Map<String, dynamic>? _findFirebaseApp(
+    List<Map<String, dynamic>> apps,
+    String platform,
+  ) {
+    for (final app in apps) {
+      final appPlatform = (_stringValue(app['platform']) ?? '').toUpperCase();
+      if (appPlatform == platform.toUpperCase()) {
+        return app;
+      }
+    }
+    return null;
+  }
+
+  String _upsertEnvFile({
+    required String path,
+    required Map<String, String?> values,
+    required bool overwrite,
+  }) {
+    final envFile = File(path);
+    envFile.parent.createSync(recursive: true);
+
+    final originalLines =
+        envFile.existsSync() ? envFile.readAsLinesSync() : <String>[];
+    var updatedLines = List<String>.from(originalLines);
+    final indexByKey = <String, int>{};
+
+    for (var i = 0; i < updatedLines.length; i++) {
+      final line = updatedLines[i].trim();
+      if (line.isEmpty || line.startsWith('#') || !line.contains('=')) {
+        continue;
+      }
+      final separatorIndex = line.indexOf('=');
+      if (separatorIndex <= 0) {
+        continue;
+      }
+      final key = line.substring(0, separatorIndex).trim();
+      if (key.isNotEmpty) {
+        indexByKey[key] = i;
+      }
+    }
+
+    var changed = false;
+    values.forEach((key, value) {
+      final normalized = _stringValue(value);
+      if (normalized == null) {
+        return;
+      }
+
+      final newLine = '$key=$normalized';
+      final existingIndex = indexByKey[key];
+      if (existingIndex == null) {
+        updatedLines.add(newLine);
+        changed = true;
+        return;
+      }
+
+      if (!overwrite) {
+        return;
+      }
+      if (updatedLines[existingIndex] != newLine) {
+        updatedLines[existingIndex] = newLine;
+        changed = true;
+      }
+    });
+
+    if (!envFile.existsSync()) {
+      if (updatedLines.isEmpty) {
+        updatedLines = <String>['# Managed by fastlane_configurator'];
+      }
+      envFile.writeAsStringSync('${updatedLines.join('\n')}\n');
+      return 'created';
+    }
+
+    if (!changed) {
+      return 'unchanged';
+    }
+
+    envFile.writeAsStringSync('${updatedLines.join('\n')}\n');
+    return 'updated';
   }
 
   String _writeTextFile(String path, String content, bool overwrite) {
@@ -446,8 +1034,9 @@ ${commandParser.usage}
 
 default_platform(:android)
 
-desc "Fetch project metadata and write fastlane/build_data.json"
+desc "Fetch Firebase + project metadata and write JSON files for CI"
 lane :fetch_data do
+  sh("flc", "firebase-sync", "--project-root", ".", "--output-path", "fastlane/firebase_data.json", "--update-env", "--overwrite", "--optional")
   sh("fastlane_configurator", "fetch-data", "--project-root", ".", "--output-path", "fastlane/build_data.json", "--include-github")
 end
 
@@ -576,6 +1165,7 @@ FASTLANE_ITC_TEAM_ID=${itcTeamId ?? ''}
 GITHUB_REPOSITORY=
 GITHUB_TOKEN=
 FIREBASE_TOKEN=
+FIREBASE_PROJECT_ID=
 FIREBASE_APP_ID_ANDROID=
 FIREBASE_APP_ID_IOS=
 FIREBASE_TESTER_GROUPS=qa
@@ -751,7 +1341,7 @@ jobs:
 
   Future<String?> _gitOutput(String projectRoot, List<String> args) async {
     try {
-      final result = await Process.run(
+      final result = await _processRunner(
         'git',
         args,
         workingDirectory: projectRoot,
